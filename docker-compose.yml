@@ -1,0 +1,282 @@
+services:
+  postgres-source:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-gaming_source}
+      POSTGRES_USER: ${POSTGRES_USER:-gaming}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_source_data:/var/lib/postgresql/data
+      - ./sql/source_schema.sql:/docker-entrypoint-initdb.d/001_source_schema.sql:ro
+      - ./sql/002_meltano_incremental_migration.sql:/docker-entrypoint-initdb.d/002_meltano_incremental_migration.sql:ro
+      - ./sql/phase2_incremental_demo.sql:/sql/phase2_incremental_demo.sql:ro
+      - ./sql/phase2_incremental_demo_update.sql:/sql/phase2_incremental_demo_update.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  postgres-analytics:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${ANALYTICS_DB:-gaming_analytics}
+      POSTGRES_USER: ${POSTGRES_USER:-gaming}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:${ANALYTICS_PORT:-5433}:5432"
+    volumes:
+      - postgres_analytics_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  meltano:
+    build:
+      context: ./docker/meltano
+    profiles: ["ingestion"]
+    working_dir: /project
+    env_file:
+      - .env
+    environment:
+      MELTANO_PROJECT_ROOT: /project
+      TAP_POSTGRES_HOST: postgres-source
+      TAP_POSTGRES_PORT: "5432"
+      TAP_POSTGRES_USER: ${POSTGRES_USER:-gaming}
+      TAP_POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      TAP_POSTGRES_DATABASE: ${POSTGRES_DB:-gaming_source}
+      TARGET_POSTGRES_HOST: postgres-analytics
+      TARGET_POSTGRES_PORT: "5432"
+      TARGET_POSTGRES_USER: ${POSTGRES_USER:-gaming}
+      TARGET_POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      TARGET_POSTGRES_DATABASE: ${ANALYTICS_DB:-gaming_analytics}
+      TARGET_POSTGRES_DEFAULT_TARGET_SCHEMA: raw
+      TARGET_POSTGRES_LOAD_METHOD: upsert
+    volumes:
+      - ./meltano:/project
+    depends_on:
+      postgres-source:
+        condition: service_healthy
+      postgres-analytics:
+        condition: service_healthy
+
+  airflow:
+    build:
+      context: .
+      dockerfile: docker/airflow/Dockerfile
+    profiles: ["orchestration"]
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW__API_AUTH__JWT_SECRET:?Set a unique JWT secret in .env}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+      AIRFLOW__API__EXPOSE_CONFIG: "false"
+      AIRFLOW__API__INSTANCE_NAME: Gaming Analytics
+      AIRFLOW_HOME: /opt/airflow
+      AIRFLOW_UID: ${AIRFLOW_UID:-50000}
+      ANALYTICS_HOST: postgres-analytics
+      ANALYTICS_PORT: "5432"
+      DBT_HOST: postgres-analytics
+      MELTANO_PROJECT_ROOT: /opt/meltano
+      POSTGRES_DB: ${POSTGRES_DB:-gaming_source}
+      POSTGRES_USER: ${POSTGRES_USER:-gaming}
+      TARGET_POSTGRES_HOST: postgres-analytics
+      TARGET_POSTGRES_PORT: "5432"
+      TARGET_POSTGRES_DATABASE: ${ANALYTICS_DB:-gaming_analytics}
+      TAP_POSTGRES_HOST: postgres-source
+      TAP_POSTGRES_PORT: "5432"
+      TAP_POSTGRES_DATABASE: ${POSTGRES_DB:-gaming_source}
+    ports:
+      - "127.0.0.1:${AIRFLOW_PORT:-8080}:8080"
+    volumes:
+      - airflow_home:/opt/airflow
+      - meltano_airflow_state:/opt/meltano/.meltano
+      - ./airflow/dags:/opt/airflow/dags:ro
+      - ./ingestion:/opt/project/ingestion:ro
+      - ./monitoring:/opt/project/monitoring:ro
+      - ./data/business:/opt/project/data/business
+      - ./sql:/opt/project/sql:ro
+      - ./dbt:/opt/project/dbt
+    command:
+      - bash
+      - -c
+      - exec airflow standalone
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/v2/monitor/health', timeout=5)"
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+    depends_on:
+      postgres-source:
+        condition: service_healthy
+      postgres-analytics:
+        condition: service_healthy
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: docker/dashboard/Dockerfile
+    profiles: ["dashboard"]
+    restart: unless-stopped
+    environment:
+      ANALYTICS_DB: ${ANALYTICS_DB:-gaming_analytics}
+      DASHBOARD_DB_HOST: postgres-analytics
+      DASHBOARD_DB_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-gaming}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    ports:
+      - "127.0.0.1:${DASHBOARD_PORT:-8501}:8501"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=5)"
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      postgres-analytics:
+        condition: service_healthy
+
+  openmetadata-mysql:
+    image: docker.getcollate.io/openmetadata/db:2.0.5
+    profiles: ["openmetadata"]
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${OPENMETADATA_MYSQL_ROOT_PASSWORD:-change-this-openmetadata-root-password}
+    volumes:
+      - openmetadata_mysql_data:/var/lib/mysql
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - mysql --user=root --password="$${MYSQL_ROOT_PASSWORD}" --silent --execute "use openmetadata_db"
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  openmetadata-opensearch:
+    image: opensearchproject/opensearch:3.4.0
+    profiles: ["openmetadata"]
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      OPENSEARCH_JAVA_OPTS: -Xms512m -Xmx512m
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      DISABLE_SECURITY_PLUGIN: "true"
+    volumes:
+      - openmetadata_opensearch_data:/usr/share/opensearch/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -fsS "http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s" > /dev/null
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  openmetadata-migrate:
+    image: docker.getcollate.io/openmetadata/server:2.0.5
+    profiles: ["openmetadata"]
+    command: ["./bootstrap/openmetadata-ops.sh", "migrate"]
+    environment: &openmetadata-server-environment
+      OPENMETADATA_CLUSTER_NAME: gaming-analytics
+      SERVER_PORT: "8585"
+      SERVER_ADMIN_PORT: "8586"
+      LOG_LEVEL: INFO
+      DB_DRIVER_CLASS: com.mysql.cj.jdbc.Driver
+      DB_SCHEME: mysql
+      DB_PARAMS: allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC
+      DB_USE_SSL: "false"
+      DB_USER: openmetadata_user
+      DB_USER_PASSWORD: openmetadata_password
+      DB_HOST: openmetadata-mysql
+      DB_PORT: "3306"
+      OM_DATABASE: openmetadata_db
+      SEARCH_TYPE: opensearch
+      ELASTICSEARCH_HOST: openmetadata-opensearch
+      ELASTICSEARCH_PORT: "9200"
+      ELASTICSEARCH_SCHEME: http
+      ELASTICSEARCH_USER: ""
+      ELASTICSEARCH_PASSWORD: ""
+      ELASTICSEARCH_CLUSTER_ALIAS: openmetadata
+      SERVER_HOST_API_URL: http://openmetadata-server:8585/api
+      PIPELINE_SERVICE_CLIENT_ENDPOINT: http://localhost:8080
+    depends_on:
+      openmetadata-mysql:
+        condition: service_healthy
+      openmetadata-opensearch:
+        condition: service_healthy
+
+  openmetadata-server:
+    image: docker.getcollate.io/openmetadata/server:2.0.5
+    profiles: ["openmetadata"]
+    restart: unless-stopped
+    environment: *openmetadata-server-environment
+    ports:
+      - "127.0.0.1:${OPENMETADATA_PORT:-8585}:8585"
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - -q
+        - -O
+        - /dev/null
+        - http://localhost:8585/api/v1/system/version
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    depends_on:
+      openmetadata-migrate:
+        condition: service_completed_successfully
+
+  openmetadata-ingestion:
+    image: docker.getcollate.io/openmetadata/ingestion:2.0.5
+    profiles: ["openmetadata"]
+    entrypoint: ["python"]
+    command: ["/opt/metadata/ingest_postgres.py"]
+    environment:
+      OPENMETADATA_HOST_PORT: http://openmetadata-server:8585/api
+      OPENMETADATA_JWT_TOKEN: ${OPENMETADATA_JWT_TOKEN:-}
+      OPENMETADATA_SERVICE_NAME: gaming-analytics
+      POSTGRES_USER: ${POSTGRES_USER:-gaming}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      ANALYTICS_DB: ${ANALYTICS_DB:-gaming_analytics}
+    volumes:
+      - ./metadata:/opt/metadata:ro
+      - ./dbt:/project/dbt:ro
+    depends_on:
+      openmetadata-server:
+        condition: service_healthy
+      postgres-analytics:
+        condition: service_healthy
+
+volumes:
+  postgres_source_data:
+  postgres_analytics_data:
+  airflow_home:
+  meltano_airflow_state:
+  openmetadata_mysql_data:
+  openmetadata_opensearch_data:

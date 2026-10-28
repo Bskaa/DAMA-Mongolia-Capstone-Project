@@ -1,0 +1,25 @@
+name: gaming_analytics
+version: "1.0.0"
+config-version: 2
+
+profile: gaming_analytics
+
+vars:
+  openmetadata_host_port: "${OPENMETADATA_HOST_PORT}"
+  openmetadata_jwt_token: "${OPENMETADATA_JWT_TOKEN}"
+  openmetadata_service_name: "${OPENMETADATA_SERVICE_NAME}"
+  openmetadata_dbt_update_owners: false
+
+model-paths: ["models"]
+test-paths: ["tests"]
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+models:
+  gaming_analytics:
+    staging:
+      +materialized: view
+    core:
+      +schema: core
+      +materialized: table

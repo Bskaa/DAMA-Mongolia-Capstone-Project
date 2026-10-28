@@ -1,0 +1,23 @@
+version: 2
+
+sources:
+  - name: raw
+    schema: raw
+    description: Immutable landing area populated by Meltano, RAWG, and Excel ingestion.
+    tables:
+      - name: players
+      - name: platforms
+      - name: games
+      - name: game_platforms
+      - name: sessions
+      - name: purchases
+      - name: achievements
+      - name: reviews
+      - name: rawg_games
+      - name: rawg_platforms
+      - name: rawg_genres
+      - name: rawg_publishers
+      - name: rawg_developers
+      - name: raw_marketing_campaigns
+      - name: raw_game_targets
+      - name: raw_campaign_budget

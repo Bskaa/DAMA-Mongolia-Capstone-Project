@@ -1,0 +1,12 @@
+gaming_analytics:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var('DBT_HOST', 'localhost') }}"
+      port: "{{ env_var('ANALYTICS_PORT', '5433') | int }}"
+      user: "{{ env_var('POSTGRES_USER', 'gaming') }}"
+      password: "{{ env_var('POSTGRES_PASSWORD') }}"
+      dbname: "{{ env_var('ANALYTICS_DB', 'gaming_analytics') }}"
+      schema: staging
+      threads: 4

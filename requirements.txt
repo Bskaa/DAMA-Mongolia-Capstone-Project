@@ -1,0 +1,7 @@
+Faker>=40.0,<41.0
+psycopg[binary]>=3.3,<4.0
+python-dotenv>=1.0,<2.0
+openpyxl>=3.1.5,<4.0
+dbt-core>=1.11,<1.12
+dbt-postgres>=1.11,<1.12
+streamlit>=1.42,<2.0

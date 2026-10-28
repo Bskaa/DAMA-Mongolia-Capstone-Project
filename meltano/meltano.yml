@@ -1,0 +1,53 @@
+project_id: 34edcf55-a46f-44c6-88ab-f4a1b1a83838
+requires_meltano: ">=4.4.1,<5.0.0"
+default_environment: dev
+
+environments:
+  - name: dev
+
+plugins:
+  extractors:
+    - name: tap-postgres
+      pip_url: meltanolabs-tap-postgres==0.10.0
+      config:
+        sqlalchemy_url: $TAP_POSTGRES_SQLALCHEMY_URL
+        default_replication_method: INCREMENTAL
+        filter_schemas:
+          - public
+      metadata:
+        public-achievements:
+          replication-method: INCREMENTAL
+          replication-key: updated_at
+        public-game_platforms:
+          replication-method: INCREMENTAL
+          replication-key: updated_at
+        public-games:
+          replication-method: INCREMENTAL
+          replication-key: updated_at
+        public-platforms:
+          replication-method: INCREMENTAL
+          replication-key: updated_at
+        public-players:
+          replication-method: INCREMENTAL
+          replication-key: updated_at
+        public-purchases:
+          replication-method: INCREMENTAL
+          replication-key: updated_at
+        public-reviews:
+          replication-method: INCREMENTAL
+          replication-key: updated_at
+        public-sessions:
+          replication-method: INCREMENTAL
+          replication-key: updated_at
+
+  loaders:
+    - name: target-postgres
+      pip_url: meltanolabs-target-postgres==0.8.1
+      config:
+        host: $TARGET_POSTGRES_HOST
+        port: $TARGET_POSTGRES_PORT
+        user: $TARGET_POSTGRES_USER
+        password: $TARGET_POSTGRES_PASSWORD
+        database: $TARGET_POSTGRES_DATABASE
+        default_target_schema: raw
+        load_method: upsert

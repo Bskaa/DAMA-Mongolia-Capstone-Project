@@ -1,0 +1,184 @@
+version: 2
+
+models:
+  - name: stg_players
+    columns:
+      - name: player_id
+        data_tests: [not_null, unique]
+      - name: username
+        data_tests: [not_null, unique]
+  - name: stg_platforms
+    columns:
+      - name: platform_id
+        data_tests: [not_null, unique]
+      - name: platform_name
+        data_tests: [not_null, unique]
+  - name: stg_games
+    columns:
+      - name: game_id
+        data_tests: [not_null, unique]
+      - name: game_name
+        data_tests: [not_null]
+      - name: price
+        data_tests: [not_null]
+  - name: stg_game_platforms
+    columns:
+      - name: game_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_games')
+                field: game_id
+      - name: platform_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_platforms')
+                field: platform_id
+  - name: stg_sessions
+    columns:
+      - name: session_id
+        data_tests: [not_null, unique]
+      - name: player_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_players')
+                field: player_id
+      - name: game_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_games')
+                field: game_id
+      - name: duration_minutes
+        data_tests: [not_null]
+  - name: stg_purchases
+    columns:
+      - name: purchase_id
+        data_tests: [not_null, unique]
+      - name: player_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_players')
+                field: player_id
+      - name: game_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_games')
+                field: game_id
+      - name: payment_method
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['card', 'wallet', 'gift_card', 'mobile']
+  - name: stg_achievements
+    columns:
+      - name: achievement_id
+        data_tests: [not_null, unique]
+      - name: player_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_players')
+                field: player_id
+      - name: game_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_games')
+                field: game_id
+  - name: stg_reviews
+    columns:
+      - name: review_id
+        data_tests: [not_null, unique]
+      - name: player_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_players')
+                field: player_id
+      - name: game_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_games')
+                field: game_id
+      - name: rating
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3, 4, 5]
+  - name: stg_rawg_games
+    columns:
+      - name: rawg_id
+        data_tests: [not_null, unique]
+      - name: name
+        data_tests: [not_null]
+  - name: stg_rawg_platforms
+    columns:
+      - name: rawg_id
+        data_tests: [not_null, unique]
+      - name: name
+        data_tests: [not_null]
+  - name: stg_rawg_genres
+    columns:
+      - name: rawg_id
+        data_tests: [not_null, unique]
+      - name: name
+        data_tests: [not_null]
+  - name: stg_rawg_publishers
+    columns:
+      - name: rawg_id
+        data_tests: [not_null, unique]
+      - name: name
+        data_tests: [not_null]
+  - name: stg_rawg_developers
+    columns:
+      - name: rawg_id
+        data_tests: [not_null, unique]
+      - name: name
+        data_tests: [not_null]
+  - name: stg_marketing_campaigns
+    columns:
+      - name: campaign_id
+        data_tests: [not_null, unique]
+      - name: game_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_games')
+                field: game_id
+  - name: stg_game_targets
+    columns:
+      - name: game_id
+        data_tests:
+          - not_null
+          - unique
+          - relationships:
+              arguments:
+                to: ref('stg_games')
+                field: game_id
+  - name: stg_campaign_budget
+    columns:
+      - name: campaign_id
+        data_tests:
+          - not_null
+          - unique
+          - relationships:
+              arguments:
+                to: ref('stg_marketing_campaigns')
+                field: campaign_id

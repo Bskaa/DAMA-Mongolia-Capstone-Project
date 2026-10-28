@@ -1,0 +1,12 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+data/generated/
+meltano/.meltano/
+dbt/target/
+dbt/logs/
+dbt/.user.yml
+airflow/logs/

@@ -1,0 +1,159 @@
+version: 2
+
+models:
+  - name: dim_date
+    columns:
+      - name: date_key
+        data_tests: [not_null, unique]
+      - name: date_day
+        data_tests: [not_null, unique]
+  - name: dim_players
+    columns:
+      - name: player_id
+        data_tests: [not_null, unique]
+      - name: username
+        data_tests: [not_null]
+  - name: dim_games
+    columns:
+      - name: game_id
+        data_tests: [not_null, unique]
+  - name: dim_platforms
+    columns:
+      - name: platform_id
+        data_tests: [not_null, unique]
+  - name: bridge_game_platforms
+    columns:
+      - name: game_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_games')
+                field: game_id
+      - name: platform_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_platforms')
+                field: platform_id
+  - name: fact_sessions
+    columns:
+      - name: session_id
+        data_tests: [not_null, unique]
+      - name: date_day
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_day
+      - name: player_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_players')
+                field: player_id
+      - name: game_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_games')
+                field: game_id
+      - name: platform_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_platforms')
+                field: platform_id
+  - name: fact_purchases
+    columns:
+      - name: purchase_id
+        data_tests: [not_null, unique]
+      - name: date_day
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_day
+      - name: player_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_players')
+                field: player_id
+      - name: game_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_games')
+                field: game_id
+      - name: amount
+        data_tests: [not_null]
+  - name: fact_reviews
+    columns:
+      - name: review_id
+        data_tests: [not_null, unique]
+      - name: date_day
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_day
+      - name: player_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_players')
+                field: player_id
+      - name: game_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_games')
+                field: game_id
+  - name: fact_achievements
+    columns:
+      - name: achievement_id
+        data_tests: [not_null, unique]
+      - name: date_day
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_day
+      - name: player_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_players')
+                field: player_id
+      - name: game_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_games')
+                field: game_id
+  - name: fact_campaigns
+    columns:
+      - name: campaign_id
+        data_tests: [not_null, unique]
+      - name: game_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_games')
+                field: game_id
