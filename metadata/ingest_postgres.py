@@ -57,7 +57,7 @@ def main() -> None:
                         "includeTables": True,
                         "includeViews": True,
                         "schemaFilterPattern": {
-                            "includes": ["^(raw|staging|staging_core)$"]
+                            "includes": ["^(bronze|silver|gold)$"]
                         },
                     }
                 },

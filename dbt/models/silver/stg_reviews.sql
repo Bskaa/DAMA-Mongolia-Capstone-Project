@@ -5,5 +5,5 @@ select
     rating::integer as rating,
     review_date::timestamp as review_date,
     updated_at::timestamp as updated_at
-from {{ source('raw', 'reviews') }}
+from {{ source('bronze', 'reviews') }}
 where _sdc_deleted_at is null

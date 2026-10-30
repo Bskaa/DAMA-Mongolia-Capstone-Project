@@ -44,7 +44,7 @@ def _relations() -> tuple[MonitoredRelation, ...]:
         "raw_campaign_budget",
         "business_file_loads",
     )
-    staging_tables = (
+    silver_tables = (
         "stg_players",
         "stg_platforms",
         "stg_games",
@@ -62,7 +62,7 @@ def _relations() -> tuple[MonitoredRelation, ...]:
         "stg_game_targets",
         "stg_campaign_budget",
     )
-    core_tables = (
+    gold_tables = (
         "bridge_game_platforms",
         "dim_date",
         "dim_games",
@@ -91,19 +91,19 @@ def _relations() -> tuple[MonitoredRelation, ...]:
         )
 
     relations = [
-        MonitoredRelation("raw", name, "_sdc_extracted_at", freshness_warn, freshness_error)
+        MonitoredRelation("bronze", name, "_sdc_extracted_at", freshness_warn, freshness_error)
         for name in meltano_tables
     ]
     relations.extend(
-        MonitoredRelation("raw", name, "fetched_at", freshness_warn, freshness_error)
+        MonitoredRelation("bronze", name, "fetched_at", freshness_warn, freshness_error)
         for name in rawg_tables
     )
     relations.extend(
-        MonitoredRelation("raw", name, "loaded_at", excel_warn, excel_error)
+        MonitoredRelation("bronze", name, "loaded_at", excel_warn, excel_error)
         for name in excel_tables
     )
-    relations.extend(MonitoredRelation("staging", name) for name in staging_tables)
-    relations.extend(MonitoredRelation("staging_core", name) for name in core_tables)
+    relations.extend(MonitoredRelation("silver", name) for name in silver_tables)
+    relations.extend(MonitoredRelation("gold", name) for name in gold_tables)
     return tuple(relations)
 
 

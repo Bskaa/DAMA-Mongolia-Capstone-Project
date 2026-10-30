@@ -7,4 +7,4 @@ select
     end_date::date as end_date,
     source_file::text as source_file,
     loaded_at::timestamptz as loaded_at
-from {{ source('raw', 'raw_marketing_campaigns') }}
+from {{ source('bronze', 'raw_marketing_campaigns') }}

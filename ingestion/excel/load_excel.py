@@ -1,4 +1,4 @@
-"""Validate and load the Excel business workbooks into analytics RAW tables."""
+"""Validate and load the Excel business workbooks into analytics Bronze tables."""
 
 from __future__ import annotations
 
@@ -276,7 +276,7 @@ def _sha256(path: Path) -> str:
 
 def _load_hashes(connection: psycopg.Connection[Any]) -> dict[str, str]:
     with connection.cursor() as cursor:
-        cursor.execute("SELECT file_name, sha256 FROM raw.business_file_loads")
+        cursor.execute("SELECT file_name, sha256 FROM bronze.business_file_loads")
         return dict(cursor.fetchall())
 
 
@@ -309,14 +309,14 @@ def _validate_relations(
     game_ids.update(row["game_id"] for row in datasets["game_targets.xlsx"])
     with connection.cursor() as cursor:
         cursor.execute(
-            "SELECT game_id FROM raw.games WHERE game_id = ANY(%s)",
+            "SELECT game_id FROM bronze.games WHERE game_id = ANY(%s)",
             (list(game_ids),),
         )
         available_ids = {row[0] for row in cursor.fetchall()}
     missing_games = game_ids - available_ids
     if missing_games:
         raise WorkbookValidationError(
-            "Excel files reference game IDs absent from analytics raw.games: "
+            "Excel files reference game IDs absent from analytics bronze.games: "
             + ", ".join(str(value) for value in sorted(missing_games)[:10])
         )
 
@@ -329,15 +329,15 @@ def _replace_snapshot(
 ) -> None:
     loaded_at = datetime.now(timezone.utc)
     with connection.cursor() as cursor:
-        cursor.execute("DELETE FROM raw.raw_campaign_budget")
-        cursor.execute("DELETE FROM raw.raw_marketing_campaigns")
-        cursor.execute("DELETE FROM raw.raw_game_targets")
+        cursor.execute("DELETE FROM bronze.raw_campaign_budget")
+        cursor.execute("DELETE FROM bronze.raw_marketing_campaigns")
+        cursor.execute("DELETE FROM bronze.raw_game_targets")
 
         campaigns = datasets["marketing_campaigns.xlsx"]
         if campaigns:
             cursor.executemany(
                 """
-                INSERT INTO raw.raw_marketing_campaigns
+                INSERT INTO bronze.raw_marketing_campaigns
                     (campaign_id, game_id, campaign, budget, start_date, end_date,
                      source_file, loaded_at)
                 VALUES (%(campaign_id)s, %(game_id)s, %(campaign)s, %(budget)s,
@@ -353,7 +353,7 @@ def _replace_snapshot(
         if targets:
             cursor.executemany(
                 """
-                INSERT INTO raw.raw_game_targets
+                INSERT INTO bronze.raw_game_targets
                     (game_id, target_revenue, target_players, target_sessions,
                      target_rating, source_file, loaded_at)
                 VALUES (%(game_id)s, %(target_revenue)s, %(target_players)s,
@@ -366,7 +366,7 @@ def _replace_snapshot(
         if budgets:
             cursor.executemany(
                 """
-                INSERT INTO raw.raw_campaign_budget
+                INSERT INTO bronze.raw_campaign_budget
                     (campaign_id, budget, actual_spend, source_file, loaded_at)
                 VALUES (%(campaign_id)s, %(budget)s, %(actual_spend)s,
                         'budget.xlsx', %(loaded_at)s)
@@ -375,7 +375,7 @@ def _replace_snapshot(
             )
         cursor.executemany(
             """
-            INSERT INTO raw.business_file_loads (file_name, sha256, row_count, loaded_at)
+            INSERT INTO bronze.business_file_loads (file_name, sha256, row_count, loaded_at)
             VALUES (%s, %s, %s, %s)
             ON CONFLICT (file_name) DO UPDATE
             SET sha256 = EXCLUDED.sha256,
@@ -402,7 +402,7 @@ def load_files(
         if not rows:
             raise WorkbookValidationError(
                 f"{spec.file_name} has no business records; refusing to replace "
-                "the RAW snapshot with an empty workbook."
+                "the Bronze snapshot with an empty workbook."
             )
         datasets[spec.file_name] = rows
         hashes[spec.file_name] = _sha256(path)

@@ -5,5 +5,5 @@ select
     achievement_name::text as achievement_name,
     achieved_at::timestamp as achieved_at,
     updated_at::timestamp as updated_at
-from {{ source('raw', 'achievements') }}
+from {{ source('bronze', 'achievements') }}
 where _sdc_deleted_at is null

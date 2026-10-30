@@ -18,8 +18,9 @@ clean-targets:
 
 models:
   gaming_analytics:
-    staging:
+    silver:
+      +schema: silver
       +materialized: view
-    core:
-      +schema: core
+    gold:
+      +schema: gold
       +materialized: table

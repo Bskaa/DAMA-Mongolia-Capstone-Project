@@ -9,4 +9,4 @@ select
     year_end::integer as year_end,
     raw_payload::jsonb as raw_payload,
     fetched_at::timestamptz as fetched_at
-from {{ source('raw', 'rawg_platforms') }}
+from {{ source('bronze', 'rawg_platforms') }}

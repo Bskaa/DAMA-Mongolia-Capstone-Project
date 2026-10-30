@@ -1,6 +1,6 @@
-CREATE SCHEMA IF NOT EXISTS raw;
+CREATE SCHEMA IF NOT EXISTS bronze;
 
-CREATE TABLE IF NOT EXISTS raw.rawg_games (
+CREATE TABLE IF NOT EXISTS bronze.rawg_games (
     rawg_id BIGINT PRIMARY KEY,
     name TEXT NOT NULL,
     slug TEXT,
@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS raw.rawg_games (
     fetched_at TIMESTAMPTZ NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS raw.rawg_platforms (
+CREATE TABLE IF NOT EXISTS bronze.rawg_platforms (
     rawg_id BIGINT PRIMARY KEY,
     name TEXT NOT NULL,
     slug TEXT,
@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS raw.rawg_platforms (
     fetched_at TIMESTAMPTZ NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS raw.rawg_genres (
+CREATE TABLE IF NOT EXISTS bronze.rawg_genres (
     rawg_id BIGINT PRIMARY KEY,
     name TEXT NOT NULL,
     slug TEXT,
@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS raw.rawg_genres (
     fetched_at TIMESTAMPTZ NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS raw.rawg_publishers (
+CREATE TABLE IF NOT EXISTS bronze.rawg_publishers (
     rawg_id BIGINT PRIMARY KEY,
     name TEXT NOT NULL,
     slug TEXT,
@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS raw.rawg_publishers (
     fetched_at TIMESTAMPTZ NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS raw.rawg_developers (
+CREATE TABLE IF NOT EXISTS bronze.rawg_developers (
     rawg_id BIGINT PRIMARY KEY,
     name TEXT NOT NULL,
     slug TEXT,
@@ -60,8 +60,8 @@ CREATE TABLE IF NOT EXISTS raw.rawg_developers (
 );
 
 CREATE INDEX IF NOT EXISTS idx_rawg_games_released
-    ON raw.rawg_games (released);
+    ON bronze.rawg_games (released);
 CREATE INDEX IF NOT EXISTS idx_rawg_games_updated
-    ON raw.rawg_games (updated);
+    ON bronze.rawg_games (updated);
 CREATE INDEX IF NOT EXISTS idx_rawg_games_name
-    ON raw.rawg_games (name);
+    ON bronze.rawg_games (name);

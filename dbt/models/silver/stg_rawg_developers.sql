@@ -6,4 +6,4 @@ select
     image_background::text as image_background,
     raw_payload::jsonb as raw_payload,
     fetched_at::timestamptz as fetched_at
-from {{ source('raw', 'rawg_publishers') }}
+from {{ source('bronze', 'rawg_developers') }}

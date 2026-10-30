@@ -46,5 +46,5 @@ plugins:
         user: $TARGET_POSTGRES_USER
         password: $TARGET_POSTGRES_PASSWORD
         database: $TARGET_POSTGRES_DATABASE
-        default_target_schema: raw
+        default_target_schema: bronze
         load_method: upsert

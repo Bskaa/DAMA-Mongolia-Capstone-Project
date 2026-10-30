@@ -46,7 +46,7 @@ def _project_environment() -> dict[str, str]:
     environment["TARGET_POSTGRES_DATABASE"] = environment.get(
         "ANALYTICS_DB", "gaming_analytics"
     )
-    environment["TARGET_POSTGRES_DEFAULT_TARGET_SCHEMA"] = "raw"
+    environment["TARGET_POSTGRES_DEFAULT_TARGET_SCHEMA"] = "bronze"
     environment["TARGET_POSTGRES_LOAD_METHOD"] = "upsert"
 
     user = quote(environment["POSTGRES_USER"], safe="")
@@ -277,7 +277,7 @@ def notify_data_quality(**context: Any) -> None:
 
 with DAG(
     dag_id="gaming_analytics_pipeline",
-    description="Daily source sync, RAWG and Excel ingestion, dbt, and quality checks.",
+    description="Daily Bronze ingestion, dbt Silver/Gold builds, and quality checks.",
     start_date=datetime(2025, 1, 1, tzinfo=ZoneInfo("Asia/Ulaanbaatar")),
     schedule="0 2 * * *",
     catchup=False,
@@ -295,7 +295,7 @@ with DAG(
         python_callable=wait_for_databases,
     )
     sync_source = PythonOperator(
-        task_id="sync_source_to_raw",
+        task_id="sync_source_to_bronze",
         python_callable=run_meltano,
     )
     ingest_rawg = PythonOperator(

@@ -1,9 +1,9 @@
 version: 2
 
 sources:
-  - name: raw
-    schema: raw
-    description: Immutable landing area populated by Meltano, RAWG, and Excel ingestion.
+  - name: bronze
+    schema: bronze
+    description: Bronze landing area populated by Meltano, RAWG, and Excel ingestion.
     tables:
       - name: players
       - name: platforms

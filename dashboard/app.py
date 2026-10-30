@@ -59,7 +59,7 @@ def load_dashboard_data(start_day: date, end_day: date, game_id: int | None, cur
             SELECT COUNT(*) AS sessions,
                    COUNT(DISTINCT sessions.player_id) AS active_players,
                    COALESCE(AVG(sessions.duration_minutes), 0)::numeric(12, 2) AS avg_session_minutes
-            FROM staging_core.fact_sessions AS sessions
+            FROM gold.fact_sessions AS sessions
             WHERE {session_where}
             """,
             session_params,
@@ -68,7 +68,7 @@ def load_dashboard_data(start_day: date, end_day: date, game_id: int | None, cur
             f"""
             SELECT COUNT(*) AS purchases,
                    COALESCE(SUM(purchases.amount), 0)::numeric(14, 2) AS gross_amount
-            FROM staging_core.fact_purchases AS purchases
+            FROM gold.fact_purchases AS purchases
             WHERE {purchase_where} AND purchases.currency = %s
             """,
             purchase_params + (currency,),
@@ -77,7 +77,7 @@ def load_dashboard_data(start_day: date, end_day: date, game_id: int | None, cur
             f"""
             SELECT COUNT(*) AS reviews,
                    COALESCE(AVG(reviews.rating), 0)::numeric(6, 2) AS avg_rating
-            FROM staging_core.fact_reviews AS reviews
+            FROM gold.fact_reviews AS reviews
             WHERE {review_where}
             """,
             review_params,
@@ -85,7 +85,7 @@ def load_dashboard_data(start_day: date, end_day: date, game_id: int | None, cur
         "sessions_by_day": fetch_frame(
             f"""
             SELECT sessions.date_day, COUNT(*) AS sessions
-            FROM staging_core.fact_sessions AS sessions
+            FROM gold.fact_sessions AS sessions
             WHERE {session_where}
             GROUP BY sessions.date_day
             ORDER BY sessions.date_day
@@ -96,7 +96,7 @@ def load_dashboard_data(start_day: date, end_day: date, game_id: int | None, cur
             f"""
             SELECT purchases.date_day,
                    SUM(purchases.amount)::numeric(14, 2) AS gross_amount
-            FROM staging_core.fact_purchases AS purchases
+            FROM gold.fact_purchases AS purchases
             WHERE {purchase_where} AND purchases.currency = %s
             GROUP BY purchases.date_day
             ORDER BY purchases.date_day
@@ -106,8 +106,8 @@ def load_dashboard_data(start_day: date, end_day: date, game_id: int | None, cur
         "top_games": fetch_frame(
             f"""
             SELECT games.game_name, COUNT(*) AS sessions
-            FROM staging_core.fact_sessions AS sessions
-            JOIN staging_core.dim_games AS games USING (game_id)
+            FROM gold.fact_sessions AS sessions
+            JOIN gold.dim_games AS games USING (game_id)
             WHERE {session_where}
             GROUP BY games.game_name
             ORDER BY sessions DESC, games.game_name
@@ -118,8 +118,8 @@ def load_dashboard_data(start_day: date, end_day: date, game_id: int | None, cur
         "platforms": fetch_frame(
             f"""
             SELECT platforms.platform_name, COUNT(*) AS sessions
-            FROM staging_core.fact_sessions AS sessions
-            JOIN staging_core.dim_platforms AS platforms USING (platform_id)
+            FROM gold.fact_sessions AS sessions
+            JOIN gold.dim_platforms AS platforms USING (platform_id)
             WHERE {session_where}
             GROUP BY platforms.platform_name
             ORDER BY sessions DESC, platforms.platform_name
@@ -132,8 +132,8 @@ def load_dashboard_data(start_day: date, end_day: date, game_id: int | None, cur
             SELECT games.game_name,
                    COUNT(*) AS reviews,
                    AVG(reviews.rating)::numeric(6, 2) AS avg_rating
-            FROM staging_core.fact_reviews AS reviews
-            JOIN staging_core.dim_games AS games USING (game_id)
+            FROM gold.fact_reviews AS reviews
+            JOIN gold.dim_games AS games USING (game_id)
             WHERE {review_where}
             GROUP BY games.game_name
             ORDER BY reviews DESC, games.game_name
@@ -146,33 +146,33 @@ def load_dashboard_data(start_day: date, end_day: date, game_id: int | None, cur
 
 st.set_page_config(page_title="Gaming Analytics", page_icon="🎮", layout="wide")
 st.title("Gaming Analytics")
-st.caption("Engagement, purchase value, and player feedback from the dbt core models.")
+st.caption("Engagement, purchase value, and player feedback from the dbt Gold models.")
 
 try:
     date_bounds = fetch_frame(
         """
         SELECT MIN(date_day) AS first_day, MAX(date_day) AS last_day
         FROM (
-            SELECT date_day FROM staging_core.fact_sessions
+            SELECT date_day FROM gold.fact_sessions
             UNION ALL
-            SELECT date_day FROM staging_core.fact_purchases
+            SELECT date_day FROM gold.fact_purchases
             UNION ALL
-            SELECT date_day FROM staging_core.fact_reviews
+            SELECT date_day FROM gold.fact_reviews
         ) AS activity
         """
     )
     games = fetch_frame(
-        "SELECT game_id, game_name FROM staging_core.dim_games ORDER BY game_name"
+        "SELECT game_id, game_name FROM gold.dim_games ORDER BY game_name"
     )
     currencies = fetch_frame(
-        "SELECT DISTINCT currency FROM staging_core.fact_purchases ORDER BY currency"
+        "SELECT DISTINCT currency FROM gold.fact_purchases ORDER BY currency"
     )
 except (psycopg.Error, RuntimeError, ValueError) as exc:
     st.error(f"Could not load dashboard filters from the analytics database: {exc}")
     st.stop()
 
 if date_bounds.empty or pd.isna(date_bounds.loc[0, "first_day"]):
-    st.warning("No dbt core data is available yet. Run the analytics pipeline first.")
+    st.warning("No dbt Gold data is available yet. Run the analytics pipeline first.")
     st.stop()
 
 first_day = date_bounds.loc[0, "first_day"]

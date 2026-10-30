@@ -7,5 +7,5 @@ select
     currency::text as currency,
     payment_method::text as payment_method,
     updated_at::timestamp as updated_at
-from {{ source('raw', 'purchases') }}
+from {{ source('bronze', 'purchases') }}
 where _sdc_deleted_at is null

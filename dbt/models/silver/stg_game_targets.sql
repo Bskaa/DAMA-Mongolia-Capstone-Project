@@ -6,4 +6,4 @@ select
     target_rating::numeric(4, 2) as target_rating,
     source_file::text as source_file,
     loaded_at::timestamptz as loaded_at
-from {{ source('raw', 'raw_game_targets') }}
+from {{ source('bronze', 'raw_game_targets') }}

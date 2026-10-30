@@ -1,4 +1,4 @@
-"""Load paginated RAWG game metadata into the analytics PostgreSQL raw schema."""
+"""Load paginated RAWG game metadata into the analytics PostgreSQL Bronze schema."""
 
 from __future__ import annotations
 
@@ -473,7 +473,7 @@ def upsert_records(
         if column != "rawg_id"
     )
     query = (
-        f'INSERT INTO raw."{resource.table}" ({column_sql}) '
+        f'INSERT INTO bronze."{resource.table}" ({column_sql}) '
         f"VALUES ({placeholders}) ON CONFLICT (rawg_id) DO UPDATE SET {updates}"
     )
     rows = [record_values(resource, record) for record in records]

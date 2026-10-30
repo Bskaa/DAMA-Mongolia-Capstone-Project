@@ -7,5 +7,5 @@ select
     ended_at::timestamp as ended_at,
     duration_minutes::integer as duration_minutes,
     updated_at::timestamp as updated_at
-from {{ source('raw', 'sessions') }}
+from {{ source('bronze', 'sessions') }}
 where _sdc_deleted_at is null

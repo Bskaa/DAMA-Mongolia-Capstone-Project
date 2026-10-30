@@ -12,4 +12,4 @@ select
     background_image::text as background_image,
     raw_payload::jsonb as raw_payload,
     fetched_at::timestamptz as fetched_at
-from {{ source('raw', 'rawg_games') }}
+from {{ source('bronze', 'rawg_games') }}

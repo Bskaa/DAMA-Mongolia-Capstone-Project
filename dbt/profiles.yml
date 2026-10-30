@@ -8,5 +8,5 @@ gaming_analytics:
       user: "{{ env_var('POSTGRES_USER', 'gaming') }}"
       password: "{{ env_var('POSTGRES_PASSWORD') }}"
       dbname: "{{ env_var('ANALYTICS_DB', 'gaming_analytics') }}"
-      schema: staging
+      schema: silver
       threads: 4
