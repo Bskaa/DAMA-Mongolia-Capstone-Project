@@ -10,7 +10,6 @@ from ingestion.generate.common import COLUMNS, TABLES
 from ingestion.generate.generate_gaming_data import (
     build_initial_dataset,
     parse_args,
-    pick_unique,
 )
 
 SMALL = ["--players", "30", "--games", "6", "--sessions", "120", "--purchases", "40", "--reviews", "25"]
@@ -106,15 +105,6 @@ class InitialDatasetTests(unittest.TestCase):
             self.assertGreaterEqual(started.date(), releases[game_id])
         review_pairs = [(row[1], row[2]) for row in data["reviews"]]
         self.assertEqual(len(review_pairs), len(set(review_pairs)))
-
-
-class PickUniqueTests(unittest.TestCase):
-    def test_skips_taken_keys_and_falls_back_to_a_scan_when_nearly_full(self) -> None:
-        rng = random.Random(1)
-        universe = [(p, g) for p in range(3) for g in range(3)]
-        taken = set(universe[:7])
-        picked = pick_unique(rng, 2, lambda: rng.choice(universe), taken, lambda: iter(universe))
-        self.assertEqual(picked, set(universe[7:]))
 
 
 if __name__ == "__main__":

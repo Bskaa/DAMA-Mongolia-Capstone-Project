@@ -33,6 +33,7 @@ models:
       - name: country
         description: ISO 3166-1 alpha-2 country code (quasi-identifier).
         config:
+          tags: ["quasi_identifier"]
           meta: {classification: internal, quasi_identifier: true}
       - name: age_band
         description: Age band derived from birth year; replaces the exact birth year.
@@ -162,7 +163,7 @@ models:
       One row per purchase. amount is in the original currency; amount_usd is
       converted with the illustrative fx_rates_to_usd seed.
     config:
-      meta: {owner: finance, data_steward: finance-lead, classification: confidential, grain: purchase}
+      meta: {owner: finance, data_steward: finance-lead, classification: confidential, grain: purchase, openmetadata: {tier: Tier.Tier2, glossary: ["GamingAnalytics.USDConversion"]}}
     columns:
       - name: purchase_id
         data_tests: [not_null, unique]

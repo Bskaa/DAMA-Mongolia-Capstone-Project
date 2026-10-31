@@ -57,7 +57,6 @@ ACHIEVEMENT_NAMES = (
 )
 COUNTRIES = ("US", "CA", "GB", "DE", "FR", "JP", "KR", "AU", "BR", "MN")
 PAYMENT_METHODS = ("card", "wallet", "gift_card", "mobile")
-CURRENCIES = ("USD", "EUR", "GBP", "JPY", "CAD")
 PRICE_POINTS = (0, 4.99, 9.99, 14.99, 19.99, 29.99, 59.99)
 
 # Tables in foreign-key load order, with their insert columns.
@@ -87,7 +86,6 @@ TABLES = tuple(COLUMNS)
 
 # Row tuples are plain tuples in COLUMNS order.
 Row = tuple[Any, ...]
-Bounds = tuple[datetime, datetime]
 
 
 def utc_start_of_day(day: date) -> datetime:
@@ -104,19 +102,6 @@ def random_datetime(rng: random.Random, start: datetime, end: datetime) -> datet
         return start
     seconds = int((end - start).total_seconds())
     return start + timedelta(seconds=rng.randint(0, seconds))
-
-
-def activity_bounds(
-    activity_start: datetime,
-    end_of_day: datetime,
-    player_created_at: datetime,
-    release_date: date,
-) -> Bounds:
-    """Earliest/latest moment a player can interact with a game."""
-    start = max(activity_start, player_created_at, utc_start_of_day(release_date))
-    if start >= end_of_day:
-        start = end_of_day - timedelta(seconds=1)
-    return start, end_of_day
 
 
 # --- Row builders -----------------------------------------------------------
@@ -174,69 +159,6 @@ def make_game(
     )
     supported = rng.sample(list(platform_ids), k=rng.randint(1, min(4, len(platform_ids))))
     return game, [(game_id, platform_id, created_at, created_at) for platform_id in supported]
-
-
-def make_session(
-    rng: random.Random,
-    session_id: int,
-    player_id: int,
-    game_id: int,
-    platform_id: int,
-    bounds: Bounds,
-) -> Row:
-    started_at = random_datetime(rng, *bounds)
-    duration = rng.randint(5, 360)
-    return (
-        session_id,
-        player_id,
-        game_id,
-        platform_id,
-        started_at,
-        started_at + timedelta(minutes=duration),
-        duration,
-        started_at,
-    )
-
-
-def make_purchase(
-    rng: random.Random,
-    purchase_id: int,
-    player_id: int,
-    game_id: int,
-    price: Decimal,
-    bounds: Bounds,
-) -> Row:
-    amount = max(Decimal("0.99"), price * Decimal(str(rng.uniform(0.5, 1.0))))
-    purchased_at = random_datetime(rng, *bounds)
-    return (
-        purchase_id,
-        player_id,
-        game_id,
-        purchased_at,
-        amount.quantize(Decimal("0.01")),
-        rng.choice(CURRENCIES),
-        rng.choice(PAYMENT_METHODS),
-        purchased_at,
-    )
-
-
-def make_review(
-    rng: random.Random, review_id: int, player_id: int, game_id: int, bounds: Bounds
-) -> Row:
-    review_date = random_datetime(rng, *bounds)
-    return (review_id, player_id, game_id, rng.randint(1, 5), review_date, review_date)
-
-
-def make_achievement(
-    rng: random.Random,
-    achievement_id: int,
-    player_id: int,
-    game_id: int,
-    achievement_name: str,
-    bounds: Bounds,
-) -> Row:
-    achieved_at = random_datetime(rng, *bounds)
-    return (achievement_id, player_id, game_id, achievement_name, achieved_at, achieved_at)
 
 
 # --- Database helpers -------------------------------------------------------

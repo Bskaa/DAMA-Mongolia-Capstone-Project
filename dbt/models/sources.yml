@@ -75,3 +75,15 @@ sources:
         description: Append-only history of every Excel record ever loaded, keyed by load_id.
         config:
           meta: {source_system: excel, ingestion: python, owner: analytics-engineering}
+
+  - name: monitoring
+    schema: monitoring
+    description: >
+      Operational history of the pipeline (quality checks, dbt results, Airflow task
+      runs, alerts), written by the monitoring scripts and DAG callbacks.
+    tables:
+      - name: data_quality_runs
+      - name: data_quality_snapshots
+      - name: dbt_node_results
+      - name: task_runs
+      - name: alert_log

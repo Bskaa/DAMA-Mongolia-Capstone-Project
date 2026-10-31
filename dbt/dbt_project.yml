@@ -9,6 +9,11 @@ vars:
   openmetadata_jwt_token: "${OPENMETADATA_JWT_TOKEN}"
   openmetadata_service_name: "${OPENMETADATA_SERVICE_NAME}"
   openmetadata_dbt_update_owners: false
+  # OpenMetadata dbt ingestion: push descriptions, and turn dbt tags into the
+  # DataGovernance classification (e.g. DataGovernance.pii on personal-data columns).
+  openmetadata_dbt_update_descriptions: true
+  openmetadata_include_tags: true
+  openmetadata_dbt_classification_name: DataGovernance
   # Calendar used for date_day / date_key in Gold (all stored timestamps are UTC).
   reporting_timezone: UTC
   # Incremental facts re-read this many days of updated rows to absorb late updates.
@@ -33,14 +38,30 @@ models:
     silver:
       +schema: silver
       +materialized: view
+      +tags: ["silver"]
     gold:
       +schema: gold
       +materialized: table
+      +tags: ["gold"]
       +grants:
         select: ["analytics_reader"]
+      # OpenMetadata tiers: Tier1 = business-critical marts, Tier2 = core model, Tier3 = operational.
+      # A model that sets its own meta.openmetadata (e.g. glossary terms) repeats its tier there.
+      +meta:
+        openmetadata:
+          tier: Tier.Tier2
       marts:
+        +tags: ["mart"]
         +meta:
           layer: gold_mart
+          openmetadata:
+            tier: Tier.Tier1
+      ops:
+        +tags: ["ops"]
+        +meta:
+          layer: gold_ops
+          openmetadata:
+            tier: Tier.Tier3
 
 seeds:
   gaming_analytics:

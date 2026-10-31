@@ -70,6 +70,26 @@ services:
       postgres-analytics:
         condition: service_healthy
 
+  postgres-airflow:
+    # Airflow's own metadata database. SQLite (the standalone default) serialises
+    # every write, which breaks down once several DAGs (hourly generator, daily
+    # pipeline, watchdog) run at the same time. Internal only: no host port.
+    image: postgres:17-alpine
+    profiles: ["orchestration"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: airflow
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: ${AIRFLOW_DB_PASSWORD:-}
+    volumes:
+      - postgres_airflow_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
   airflow:
     build:
       context: .
@@ -80,6 +100,8 @@ services:
       - .env
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      # Use a URL-safe password (letters, digits, - and _), e.g. python -c "import secrets; print(secrets.token_urlsafe(24))"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${AIRFLOW_DB_PASSWORD:-}@postgres-airflow:5432/airflow
       AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW__API_AUTH__JWT_SECRET:?Set a unique JWT secret in .env}
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
@@ -128,6 +150,8 @@ services:
       postgres-source:
         condition: service_healthy
       postgres-analytics:
+        condition: service_healthy
+      postgres-airflow:
         condition: service_healthy
 
   dashboard:
@@ -212,8 +236,10 @@ services:
       DB_SCHEME: mysql
       DB_PARAMS: allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC
       DB_USE_SSL: "false"
-      DB_USER: openmetadata_user
-      DB_USER_PASSWORD: openmetadata_password
+      # The openmetadata/db image creates this MySQL user with the default password.
+      # To change it, first run ALTER USER in openmetadata-mysql, then set both values in .env.
+      DB_USER: ${OPENMETADATA_DB_USER:-openmetadata_user}
+      DB_USER_PASSWORD: ${OPENMETADATA_DB_PASSWORD:-openmetadata_password}
       DB_HOST: openmetadata-mysql
       DB_PORT: "3306"
       OM_DATABASE: openmetadata_db
@@ -277,6 +303,7 @@ services:
         condition: service_healthy
 
 volumes:
+  postgres_airflow_data:
   postgres_source_data:
   postgres_analytics_data:
   airflow_home:

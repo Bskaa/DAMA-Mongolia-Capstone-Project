@@ -2,6 +2,7 @@
 
 * project_environment(): container-internal connection settings for project code
 * run_module():          run `python -m <module>` from the project virtualenv
+* run_dbt():             run dbt with a caller-specific target path
 * TASK_CALLBACKS:        on_success / on_retry / on_failure callbacks for default_args.
   Every task try is recorded in monitoring.task_runs (durations -> slow_task rule) and
   a failed task is alerted immediately (email + monitoring.alert_log).
@@ -62,6 +63,24 @@ def run_module(module: str, *args: str, timeout: float | None = None,
         timeout=timeout,
         capture_output=capture,
         text=True,
+    )
+
+
+def run_dbt(*args: str, target_path: str) -> None:
+    """Run dbt from the project virtualenv; each caller gets its own target path, so
+    run_results.json of one DAG never overwrites another's."""
+    subprocess.run(
+        [
+            str(VENV / "bin" / "dbt"),
+            *args,
+            "--project-dir", str(PROJECT_ROOT / "dbt"),
+            "--profiles-dir", str(PROJECT_ROOT / "dbt"),
+            "--target-path", target_path,
+            "--log-path", f"{target_path}-logs",
+        ],
+        cwd=PROJECT_ROOT,
+        env=project_environment(),
+        check=True,
     )
 
 

@@ -13,7 +13,7 @@ models:
     config:
       contract:
         enforced: true
-      meta: {owner: analytics-engineering, classification: internal, grain: day}
+      meta: {owner: analytics-engineering, classification: internal, grain: day, openmetadata: {tier: Tier.Tier1, glossary: ["GamingAnalytics.DAU", "GamingAnalytics.NewPlayer", "GamingAnalytics.ARPDAU", "GamingAnalytics.ARPPU", "GamingAnalytics.USDConversion"]}}
     columns:
       - name: date_key
         data_type: integer
@@ -57,7 +57,7 @@ models:
       targets in game_targets.xlsx. Targets are compared with all warehouse
       activity because the workbook has no target period.
     config:
-      meta: {owner: product, data_steward: product-lead, classification: internal, grain: game}
+      meta: {owner: product, data_steward: product-lead, classification: internal, grain: game, openmetadata: {tier: Tier.Tier1, glossary: ["GamingAnalytics.RevenueAttainment"]}}
     columns:
       - name: game_id
         data_tests:
@@ -77,7 +77,7 @@ models:
       Revenue of the promoted game during each campaign versus an equally long
       window just before it, with uplift ROI relative to actual spend.
     config:
-      meta: {owner: marketing, data_steward: marketing-lead, classification: confidential, grain: campaign}
+      meta: {owner: marketing, data_steward: marketing-lead, classification: confidential, grain: campaign, openmetadata: {tier: Tier.Tier1, glossary: ["GamingAnalytics.RevenueUplift"]}}
     columns:
       - name: campaign_id
         data_tests: [not_null, unique]
@@ -87,7 +87,7 @@ models:
   - name: mart_player_retention
     description: Monthly cohort retention table (cohort = month of first session).
     config:
-      meta: {owner: analytics-engineering, classification: internal, grain: cohort_month x months_since_first_session}
+      meta: {owner: analytics-engineering, classification: internal, grain: cohort_month x months_since_first_session, openmetadata: {tier: Tier.Tier1, glossary: ["GamingAnalytics.RetentionRate"]}}
     columns:
       - name: cohort_month
         data_tests: [not_null]

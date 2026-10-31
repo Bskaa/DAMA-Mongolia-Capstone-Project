@@ -213,6 +213,90 @@ GENRE_SQL = """
 """
 
 
+HEALTH_SQL = {
+    "quality": """
+        SELECT check_day, status, passed_count, warning_count, failed_count
+        FROM gold.ops_quality_daily ORDER BY check_day DESC LIMIT 60
+    """,
+    "relations": """
+        SELECT relation, row_count, column_count, freshness_status, volume_status,
+               volume_change_percent, last_ingested_at
+        FROM gold.ops_relation_health
+        ORDER BY (freshness_status = 'fail' OR volume_status = 'fail') DESC,
+                 (freshness_status = 'warn' OR volume_status = 'warn') DESC, relation
+    """,
+    "dbt": """
+        SELECT run_day, resource_type, passed, warned, failed, skipped, failing_rows
+        FROM gold.ops_dbt_results_daily ORDER BY run_day DESC LIMIT 200
+    """,
+    "tasks": """
+        SELECT dag_id, task_id, runs, failures, avg_seconds, max_seconds
+        FROM gold.ops_task_daily
+        WHERE run_day = (SELECT max(run_day) FROM gold.ops_task_daily)
+        ORDER BY avg_seconds DESC NULLS LAST
+    """,
+    "alerts": """
+        SELECT fired_at, severity, check_name, object, detail, source, sent
+        FROM gold.ops_alerts ORDER BY fired_at DESC LIMIT 100
+    """,
+}
+
+
+def render_pipeline_health() -> None:
+    st.caption(
+        "Operational metadata from the monitoring history (up to the previous pipeline run): "
+        "quality checks, dbt results, Airflow task durations and alerts."
+    )
+    data = {name: fetch_frame(sql) for name, sql in HEALTH_SQL.items()}
+    quality, relations, dbt_results, tasks, alerts = (
+        data["quality"], data["relations"], data["dbt"], data["tasks"], data["alerts"]
+    )
+    if quality.empty and alerts.empty and dbt_results.empty:
+        st.info("No monitoring history yet. It appears after the first daily pipeline run.")
+        return
+
+    latest = quality.iloc[0] if not quality.empty else None
+    icon = {"pass": "✅", "warn": "🟡", "fail": "🔴"}
+    columns = st.columns(4)
+    columns[0].metric(
+        "Last quality check",
+        f"{icon.get(latest['status'], '')} {latest['status']}" if latest is not None else "n/a",
+        help=str(latest["check_day"]) if latest is not None else None,
+    )
+    failing = relations[(relations["freshness_status"] == "fail") | (relations["volume_status"] == "fail")]
+    columns[1].metric("Failing relations", f"{len(failing):,}", help=f"of {len(relations):,} monitored")
+    recent = alerts[pd.to_datetime(alerts["fired_at"], utc=True) >= pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=7)]
+    columns[2].metric("Critical alerts (7 days)", f"{int((recent['severity'] == 'critical').sum()):,}")
+    tests = dbt_results[dbt_results["resource_type"] == "test"]
+    last_tests = tests[tests["run_day"] == tests["run_day"].max()] if not tests.empty else tests
+    columns[3].metric(
+        "dbt tests failing (last run)",
+        f"{int(last_tests['failed'].sum()):,}" if not last_tests.empty else "n/a",
+        help=f"{int(last_tests['warned'].sum()):,} warning" if not last_tests.empty else None,
+    )
+
+    left, right = st.columns(2)
+    with left:
+        st.subheader("Quality checks per day")
+        if not quality.empty:
+            st.line_chart(quality.sort_values("check_day"), x="check_day", y=["warning_count", "failed_count"])
+    with right:
+        st.subheader("dbt tests per day")
+        if not tests.empty:
+            st.line_chart(tests.sort_values("run_day"), x="run_day", y=["passed", "warned", "failed"])
+
+    st.subheader("Task durations (latest day)")
+    if not tasks.empty:
+        tasks = tasks.assign(task=tasks["dag_id"] + " · " + tasks["task_id"])
+        st.bar_chart(tasks.head(15), x="task", y="avg_seconds")
+    st.subheader("Relations needing attention")
+    attention = relations[(relations["freshness_status"].isin(["fail", "warn"]))
+                          | (relations["volume_status"].isin(["fail", "warn"]))]
+    st.dataframe(attention if not attention.empty else relations.head(0), hide_index=True)
+    st.subheader("Recent alerts")
+    st.dataframe(alerts, hide_index=True)
+
+
 def render_overview(start_day: date, end_day: date, game_id: int | None, currency: str) -> None:
     data = load_overview(start_day, end_day, game_id, currency)
     kpis = data["kpis"].iloc[0]
@@ -444,8 +528,9 @@ if isinstance(selected_range, (tuple, list)):
 else:
     start_day = end_day = selected_range
 
-overview_tab, kpi_tab, target_tab, campaign_tab, retention_tab, genre_tab = st.tabs(
-    ["Overview", "Daily KPIs", "Targets vs actual", "Campaigns", "Retention", "Genre benchmark (RAWG)"]
+overview_tab, kpi_tab, target_tab, campaign_tab, retention_tab, genre_tab, health_tab = st.tabs(
+    ["Overview", "Daily KPIs", "Targets vs actual", "Campaigns", "Retention", "Genre benchmark (RAWG)",
+     "Pipeline health"]
 )
 try:
     with overview_tab:
@@ -460,6 +545,8 @@ try:
         render_retention()
     with genre_tab:
         render_genre_benchmark()
+    with health_tab:
+        render_pipeline_health()
 except psycopg.Error as exc:
     st.error(f"Could not query the analytics database: {exc}")
     st.stop()

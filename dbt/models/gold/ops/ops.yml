@@ -1,0 +1,46 @@
+version: 2
+
+# Pipeline health in Gold, so the read-only dashboard role can show it
+# (the monitoring schema itself is not granted to analytics_reader).
+# Values reflect the monitoring history up to the previous pipeline run.
+
+models:
+  - name: ops_quality_daily
+    description: Last data-quality run of each day (status and counts).
+    config:
+      meta: {owner: analytics-engineering, classification: internal, grain: day}
+    columns:
+      - name: check_day
+        data_tests: [unique]
+      - name: status
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['pass', 'warn', 'fail']
+  - name: ops_relation_health
+    description: Latest monitored health of every relation (rows, columns, freshness, volume).
+    config:
+      meta: {owner: analytics-engineering, classification: internal, grain: relation}
+    columns:
+      - name: relation
+        data_tests: [unique]
+  - name: ops_dbt_results_daily
+    description: dbt models/tests passing, warning, failing and skipped per day.
+    config:
+      meta: {owner: analytics-engineering, classification: internal, grain: day x resource_type}
+  - name: ops_task_daily
+    description: Airflow task runs, failures and durations per day (final try per run).
+    config:
+      meta: {owner: analytics-engineering, classification: internal, grain: day x dag x task}
+  - name: ops_alerts
+    description: Alerts fired in the last 90 days, with severity and whether they were emailed.
+    config:
+      meta: {owner: analytics-engineering, classification: internal, grain: alert}
+    columns:
+      - name: alert_id
+        data_tests: [unique]
+      - name: severity
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['critical', 'warn']

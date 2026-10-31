@@ -1,11 +1,13 @@
 """Daily gaming analytics pipeline: Bronze ingestion, dbt build, quality checks, alerts.
 
-    check_databases ─┬─> sync_source_to_bronze ──> load_business_workbooks ─┐
-                     └─> ingest_rawg (skipped if unavailable) ──────────────┴─> dbt_build
-    dbt_build ──> collect_dbt_results ──> monitor_data_quality ──> check_and_alert
+    check_databases ─┬─> sync_source_to_bronze ─┬─> load_business_workbooks ─┐
+                     │                          └─> reconcile_source_bronze ─┼──────────┐
+                     └─> ingest_rawg (skipped if unavailable) ───────────────┴─> dbt_build
+    dbt_build ──> collect_dbt_results ──> monitor_data_quality ──> check_and_alert <──┘
 
 * Every task records its tries in monitoring.task_runs, and a task that fails
   (after retries) is emailed immediately (pipeline_ops.TASK_CALLBACKS).
+* reconcile_source_bronze compares source and Bronze row counts (completeness).
 * collect_dbt_results stores every dbt node result, so test results have a history.
 * check_and_alert evaluates monitoring/checks.sql: new problems are emailed once
   per day, "all clear" is a short ✅, and a critical problem turns the task red.
@@ -28,11 +30,11 @@ from airflow.task.trigger_rule import TriggerRule
 from pipeline_ops import (
     ANALYTICS_HOST,
     MELTANO_ROOT,
-    PROJECT_ROOT,
     SOURCE_HOST,
     TASK_CALLBACKS,
     VENV,
     project_environment,
+    run_dbt,
     run_module,
 )
 
@@ -85,23 +87,15 @@ def build_dbt() -> None:
     `dbt build` tests each model right after building it and skips everything
     downstream of a failing test, so bad data never reaches Gold.
     """
-    subprocess.run(
-        [
-            str(VENV / "bin" / "dbt"),
-            "build",
-            "--project-dir",
-            str(PROJECT_ROOT / "dbt"),
-            "--profiles-dir",
-            str(PROJECT_ROOT / "dbt"),
-            "--target-path",
-            DBT_TARGET_PATH,
-            "--log-path",
-            "/tmp/dbt-logs",
-        ],
-        cwd=PROJECT_ROOT,
-        env=project_environment(),
-        check=True,
-    )
+    run_dbt("build", target_path=DBT_TARGET_PATH)
+
+
+def reconcile_source_bronze() -> None:
+    """Source vs Bronze row counts; mismatches become alerts in check_and_alert."""
+    result = run_module("monitoring.reconcile", check=False, capture=True)
+    print(result.stdout, result.stderr)
+    if result.returncode:
+        raise AirflowException(f"Reconciliation crashed (exit code {result.returncode}).")
 
 
 def collect_dbt_results() -> None:
@@ -172,6 +166,7 @@ with DAG(
         # refresh is fine because dbt reuses the previous RAWG data.
         trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
     )
+    reconcile = PythonOperator(task_id="reconcile_source_bronze", python_callable=reconcile_source_bronze)
     store_dbt_results = PythonOperator(
         task_id="collect_dbt_results",
         python_callable=collect_dbt_results,
@@ -194,6 +189,7 @@ with DAG(
     # parallel; the Excel loader validates game IDs against bronze.games, so it
     # waits for Meltano.
     check_databases >> [sync_source, ingest_rawg]
-    sync_source >> load_excel
+    sync_source >> [load_excel, reconcile]
     [load_excel, ingest_rawg] >> build_dbt_models
     build_dbt_models >> store_dbt_results >> monitor_quality >> alert  # measure, then judge
+    reconcile >> alert

@@ -59,6 +59,11 @@ final_tries AS (
     SELECT DISTINCT ON (dag_id, task_id, run_id) *
     FROM monitoring.task_runs
     ORDER BY dag_id, task_id, run_id, try_number DESC
+),
+latest_reconciliation AS (
+    SELECT *
+    FROM monitoring.reconciliation
+    WHERE checked_at = (SELECT max(checked_at) FROM monitoring.reconciliation)
 )
 
 -- 1 . FRESHNESS . a source stopped arriving --------------------------------
@@ -192,3 +197,22 @@ SELECT 'warn', 'generator_silent', 'gaming_source_data_generator',
 FROM final_tries
 WHERE dag_id = 'gaming_source_data_generator' AND state = 'success'
 HAVING max(ended_at) < now() - interval '3 hours'
+
+UNION ALL
+
+-- 13 . COMPLETENESS . the source has rows that never reached Bronze -----------------------
+SELECT 'critical', 'source_bronze_mismatch', 'bronze.' || table_name,
+       CASE status WHEN 'bronze_empty' THEN 'Bronze empty, source has ' || source_rows || ' rows'
+            ELSE (source_rows - bronze_rows) || ' rows missing (source ' || source_rows
+                 || ', Bronze ' || bronze_rows || ' up to ' || to_char(compared_up_to, 'YYYY-MM-DD HH24:MI') || ')'
+       END
+FROM latest_reconciliation
+WHERE status IN ('missing_in_bronze', 'bronze_empty')
+
+UNION ALL
+
+-- 14 . COMPLETENESS . Bronze keeps rows the source no longer has (hard deletes) ------------
+SELECT 'warn', 'deleted_at_source', 'bronze.' || table_name,
+       difference || ' more rows than the source: hard deletes are not replicated'
+FROM latest_reconciliation
+WHERE status = 'extra_in_bronze'

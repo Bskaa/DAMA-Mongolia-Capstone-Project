@@ -7,6 +7,7 @@ from unittest import mock
 
 from monitoring.alerts import compose_email, new_alerts, smtp_settings, sort_alerts
 from monitoring.collect_dbt_results import parse_run_results
+from monitoring.reconcile import classify
 from tests.airflow_stubs import CREATED_DAGS, load_dag_file
 
 ALERTS = [
@@ -74,6 +75,15 @@ class DbtResultsTests(unittest.TestCase):
             parse_run_results({"results": []})
 
 
+class ReconciliationTests(unittest.TestCase):
+    def test_bounds_classify_missing_extra_and_healthy(self) -> None:
+        self.assertEqual(classify(lower=100, upper=120, bronze_rows=110), "match")
+        self.assertEqual(classify(lower=100, upper=120, bronze_rows=97), "missing_in_bronze")
+        self.assertEqual(classify(lower=100, upper=100, bronze_rows=101), "extra_in_bronze")
+        self.assertEqual(classify(lower=0, upper=50, bronze_rows=0), "bronze_empty")
+        self.assertEqual(classify(lower=0, upper=0, bronze_rows=0), "match")
+
+
 class DagIntegrityTests(unittest.TestCase):
     """Every DAG file imports, and every task carries the monitoring callbacks."""
 
@@ -82,13 +92,14 @@ class DagIntegrityTests(unittest.TestCase):
         CREATED_DAGS.clear()
         cls.modules = {
             name: load_dag_file(name)
-            for name in ("gaming_analytics_pipeline", "gaming_source_data_generator", "pipeline_watchdog")
+            for name in ("gaming_analytics_pipeline", "gaming_source_data_generator", "pipeline_watchdog",
+                         "dbt_weekly_full_refresh")
         }
         cls.dags = {dag.dag_id: dag for dag in CREATED_DAGS}
 
     def test_expected_dags_exist(self) -> None:
         self.assertTrue({"gaming_analytics_pipeline", "gaming_source_data_generator",
-                         "pipeline_watchdog", "alert_drill"} <= set(self.dags))
+                         "pipeline_watchdog", "alert_drill", "dbt_weekly_full_refresh"} <= set(self.dags))
 
     def test_every_dag_records_and_alerts_task_outcomes(self) -> None:
         for dag in self.dags.values():
@@ -100,7 +111,8 @@ class DagIntegrityTests(unittest.TestCase):
         tasks = {task.task_id: task for task in self.dags["gaming_analytics_pipeline"].tasks}
         self.assertEqual(tasks["collect_dbt_results"].upstream, {"dbt_build"})
         self.assertEqual(tasks["monitor_data_quality"].upstream, {"collect_dbt_results"})
-        self.assertEqual(tasks["check_and_alert"].upstream, {"monitor_data_quality"})
+        self.assertEqual(tasks["check_and_alert"].upstream, {"monitor_data_quality", "reconcile_source_bronze"})
+        self.assertEqual(tasks["reconcile_source_bronze"].upstream, {"sync_source_to_bronze"})
         for task_id in ("collect_dbt_results", "monitor_data_quality", "check_and_alert"):
             self.assertEqual(tasks[task_id].kwargs["trigger_rule"], "all_done")
 

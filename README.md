@@ -68,11 +68,16 @@ flowchart LR
     A[check_databases] --> B[sync_source_to_bronze]
     A --> C[ingest_rawg]
     B --> D[load_business_workbooks]
+    B --> R[reconcile_source_bronze]
     D --> E[dbt_build]
     C -. skipped is OK .-> E
     E --> H[collect_dbt_results] --> F[monitor_data_quality] --> G[check_and_alert]
+    R --> G
 ```
 
+Other DAGs: `gaming_source_data_generator` (hourly synthetic traffic), `pipeline_watchdog` (10:00, independent alert check), `alert_drill` (manual, fails on purpose) and `dbt_weekly_full_refresh` (Sunday 04:00).
+
+- `reconcile_source_bronze` compares row counts between the source database and Bronze (completeness across systems).
 - `ingest_rawg` runs in parallel with Meltano. If the API key is missing or the API fails, the task is **skipped** (not failed) and `dbt_build` reuses the previously loaded RAWG data.
 - `dbt_build` runs `dbt build`: seeds, snapshots, models, data tests, unit tests and contracts in dependency order. A failing test stops everything downstream of it, so bad data never reaches Gold.
 - `collect_dbt_results`, `monitor_data_quality` and `check_and_alert` run even when an earlier task failed (`all_done`): the pipeline first measures, then judges. See [Operational monitoring and alerting](#6a-operational-monitoring-and-alerting).
@@ -90,7 +95,7 @@ flowchart LR
 | API ingestion | Python standard library, psycopg | Validated and retry-aware RAWG ingestion |
 | Spreadsheet ingestion | openpyxl, psycopg | Excel contract validation, snapshot and history loading |
 | Transformation | dbt Core 1.11, dbt-postgres | Silver views, SCD2 snapshots, incremental facts, marts, tests, contracts |
-| Orchestration | Apache Airflow 3 (standalone, LocalExecutor) | Scheduled pipeline execution and notification |
+| Orchestration | Apache Airflow 3 (standalone, LocalExecutor, PostgreSQL metadata DB) | Scheduled pipelines, callbacks and alerts |
 | Data quality | dbt tests, Python monitor | Rule-based tests plus freshness and volume monitoring |
 | Metadata | OpenMetadata, MySQL, OpenSearch | Catalogue, descriptions, ownership and dbt lineage |
 | Visualization | Streamlit, Altair, pandas | Read-only analytics dashboard |
@@ -105,8 +110,9 @@ flowchart LR
 │   ├── gaming_analytics_pipeline.py      # Daily ingestion, dbt build, quality checks
 │   ├── gaming_source_data_generator.py   # Hourly synthetic traffic into the source DB
 │   ├── pipeline_watchdog.py              # Independent 10:00 watchdog + alert_drill
+│   ├── dbt_weekly_full_refresh.py        # Sunday rebuild of incremental facts
 │   └── pipeline_ops/                     # Shared env + task callbacks (in .airflowignore)
-├── dashboard/app.py                      # Streamlit app (6 tabs, read-only role)
+├── dashboard/app.py                      # Streamlit app (7 tabs incl. Pipeline health, read-only role)
 ├── data/business/                        # marketing_campaigns, game_targets, budget workbooks
 ├── dbt/
 │   ├── macros/                           # UTC conversion, date keys, reader-role grants
@@ -114,7 +120,8 @@ flowchart LR
 │   │   ├── sources.yml                   # Bronze sources with owners and PII flags
 │   │   ├── silver/                       # stg_* typed views
 │   │   └── gold/                         # dim_*, fact_*, bridge, *_history
-│   │       └── marts/                    # mart_* business marts
+│   │       ├── marts/                    # mart_* business marts
+│   │       └── ops/                      # ops_* pipeline health (from monitoring)
 │   ├── seeds/fx_rates_to_usd.csv         # Illustrative FX reference data
 │   ├── snapshots/snapshots.yml           # SCD Type 2 snapshots (players, games)
 │   ├── tests/                            # Singular SQL tests
@@ -124,15 +131,19 @@ flowchart LR
 ├── ingestion/
 │   ├── api/rawg.py                       # RAWG API client and loader
 │   ├── excel/                            # Workbook generation and loading
-│   └── generate/                         # generate_gaming_data CLI (--mode initial|append) + common.py
-├── metadata/ingest_postgres.py           # OpenMetadata PostgreSQL workflow
+│   └── generate/                         # generate_gaming_data CLI + behavior.py (churn, hits, campaigns)
+├── metadata/
+│   ├── ingest_postgres.py                # OpenMetadata PostgreSQL workflow
+│   └── create_glossary.py                # Business glossary in OpenMetadata
 ├── meltano/meltano.yml
 ├── monitoring/
 │   ├── data_quality.py                   # Freshness, volume and column-count checks
 │   ├── collect_dbt_results.py            # dbt run_results.json -> monitoring.dbt_node_results
 │   ├── task_events.py                    # Airflow task tries -> monitoring.task_runs
-│   ├── checks.sql                        # The 12 alert rules
+│   ├── reconcile.py                      # Source vs Bronze row counts
+│   ├── checks.sql                        # The 14 alert rules
 │   └── alerts.py                         # Rules -> one email + monitoring.alert_log
+├── scripts/check_env.py                  # .env security audit
 ├── sql/                                  # Source DDL, Bronze DDL, migrations, access roles
 ├── tests/                                # Python unit tests and CI fixtures
 ├── .env.example
@@ -195,7 +206,7 @@ The same definitions are stored as dbt descriptions and appear in OpenMetadata.
 | Data architecture | Medallion zones with one writer per zone; Kimball star schema in Gold |
 | Data modelling | Declared grains, surrogate `date_key`, bridge table, SCD Type 2 history, contract on `mart_daily_kpis` |
 | Data integration | Meltano incremental replication, validated API and Excel loaders, idempotent upserts |
-| Data quality | dbt tests mapped to quality dimensions (below), freshness/volume/schema monitoring with history, 12 alert rules with once-per-day emails |
+| Data quality | dbt tests mapped to quality dimensions (below), freshness/volume/schema monitoring with history, source-to-Bronze reconciliation, 14 alert rules with once-per-day emails |
 | Metadata management | Descriptions, owners, data stewards, classification and PII flags in dbt YAML; OpenMetadata catalogue and lineage; operational metadata (dbt results, task runs, alerts) kept as history in `monitoring` |
 | Data security | Least-privilege roles; dashboard login reads Gold only, in read-only transactions |
 | Reference and master data | `fx_rates_to_usd` seed; conformed `dim_games` / `dim_players` with history |
@@ -321,12 +332,25 @@ On a brand-new analytics volume step 6 runs automatically (`docker/postgres-anal
 > 1. Run `sql/005_rename_analytics_layers.sql` once if the old `raw`/`staging`/`staging_core` schemas exist.
 > 2. Run the Excel loader once; it applies `sql/004_excel_business_schema.sql`, which drops the old Bronze foreign keys and creates the history tables.
 > 3. Run `dbt build --full-refresh` once, because `fact_sessions` and `fact_purchases` changed from tables to incremental models.
+> 4. Optional, for the behaviour model: re-seed the source (`--reset`) and refresh targets (`generate_business_data --only targets`), then run Meltano and `dbt build --full-refresh`.
 
 ## Workflows
 
 ### 1. Synthetic source data
 
-One CLI, `ingestion.generate.generate_gaming_data`, creates deterministic, referentially valid operational data in `postgres-source.public`. Both modes build rows with the same builders in `ingestion/generate/common.py`, so the business rules (activity never before account creation or game release, sessions only on supported platforms, one review per player and game) are identical.
+One CLI, `ingestion.generate.generate_gaming_data`, creates deterministic, referentially valid operational data in `postgres-source.public`. Both modes use the same row builders and behaviour model, so the business rules (activity never before account creation or game release, sessions only on supported platforms, one review per player and game) are identical.
+
+Uniformly random data gives flat dashboards, so `ingestion/generate/behavior.py` adds the patterns real gaming data has. Traits are derived from the entity id, so the initial load and every hourly append agree on them.
+
+| Pattern | Effect in the marts |
+| --- | --- |
+| Players have an activity level and a lifetime (55 % casual ≈ 1 month, 30 % regular ≈ 5 months, 15 % loyal for years) | Retention decays month by month |
+| 70 % never pay, 25 % pay sometimes, 5 % are "whales" | Realistic payer share and ARPPU |
+| Game popularity is heavy-tailed; each game has a hidden quality | A few hits dominate; ratings differ by game |
+| Sessions follow the Ulaanbaatar day (night ≈ 0.2x, evening peak), weekends +20 % | Daily and weekly rhythm in DAU |
+| Campaigns in `marketing_campaigns.xlsx` make the promoted game ≈ 2.5x as popular while they run | Positive campaign uplift |
+| Purchases happen inside sessions, in the player's local currency (MN → MNT, JP → JPY, ...) | Multi-currency revenue; USD via the FX seed |
+| Reviews and achievements only from player/game pairs that played | Consistent funnels |
 
 | Mode | What it does | Defaults |
 | --- | --- | --- |
@@ -349,6 +373,15 @@ One CLI, `ingestion.generate.generate_gaming_data`, creates deterministic, refer
 # All options and per-mode defaults
 .\.venv\Scripts\python.exe -m ingestion.generate.generate_gaming_data --help
 ```
+
+**Re-seeding** with the behaviour model: keep the campaigns (they shape the activity), then refresh the targets from the new actuals.
+
+```powershell
+.\.venv\Scripts\python.exe -m ingestion.generate.generate_gaming_data --reset
+.\.venv\Scripts\python.exe -m ingestion.excel.generate_business_data --only targets
+```
+
+The committed `game_targets.xlsx` already matches a default `--reset` seed.
 
 ### 2. Incremental source-to-Bronze replication
 
@@ -380,13 +413,16 @@ Set `RAWG_API_KEY` in `.env` first. Show the RAWG attribution wherever RAWG-deri
 
 Workbooks in `data/business`: `marketing_campaigns.xlsx`, `game_targets.xlsx`, `budget.xlsx`.
 
+`generate_business_data` sets each target to the game's actual revenue (USD), players, sessions and rating times a random ambition factor (0.7-1.4), so roughly a third to half of the games meet their target.
+
 The loader requires exact sheet names and headers, normalises types, rejects invalid dates and values, checks campaign/budget agreement, confirms referenced games exist in `bronze.games`, deduplicates identical rows and skips unchanged files by SHA-256. Each changed load:
 
 - replaces the current snapshot tables (`bronze.raw_*`), and
 - appends to `bronze.business_load_log` (one row per file) and `bronze.business_record_history` (every record as JSON), so earlier targets and budgets remain auditable.
 
 ```powershell
-.\.venv\Scripts\python.exe -m ingestion.excel.generate_business_data   # optional sample workbooks
+.\.venv\Scripts\python.exe -m ingestion.excel.generate_business_data   # all three sample workbooks
+.\.venv\Scripts\python.exe -m ingestion.excel.generate_business_data --only targets  # targets from actuals
 .\.venv\Scripts\python.exe -m ingestion.excel.load_excel
 .\.venv\Scripts\python.exe -m ingestion.excel.load_excel --force       # reload unchanged files
 ```
@@ -429,6 +465,7 @@ The warehouse tables describe the business; the `monitoring` schema describes th
 | `monitoring.data_quality_runs`, `data_quality_snapshots` | `monitoring.data_quality` | check run / relation (rows, columns, freshness, volume) |
 | `monitoring.dbt_node_results` | `monitoring.collect_dbt_results` (after `dbt_build`) | dbt node per invocation (status, seconds, failures) |
 | `monitoring.task_runs` | Airflow callbacks (`airflow/dags/pipeline_ops`) | task try (state, duration) |
+| `monitoring.reconciliation` | `monitoring.reconcile` | table per check (source rows, Bronze rows, status) |
 | `monitoring.alert_log` | `monitoring.alerts` | alert that fired (sent or not) |
 
 `monitoring/checks.sql` holds the rules. Each returns `severity, check_name, object, detail`; zero rows means all is well.
@@ -447,6 +484,14 @@ The warehouse tables describe the business; the `monitoring` schema describes th
 | 10 | `slow_task` | warn | A task took over 60 s and 3x its 7-day average |
 | 11 | `pipeline_silent` | critical | No quality check ran today: silence must not look like health |
 | 12 | `generator_silent` | warn | The hourly generator has not succeeded for 3 hours |
+| 13 | `source_bronze_mismatch` | critical | Source rows (up to Bronze's newest `updated_at`) are missing in Bronze, or Bronze is empty |
+| 14 | `deleted_at_source` | warn | Bronze keeps rows the source deleted (hard deletes are not replicated) |
+
+**Reconciliation.** For each replicated table, with `bound` = the newest `updated_at` in Bronze: every source row with `updated_at <= bound` must be in Bronze, and Bronze cannot have more rows than the source (for append-only event tables, exactly as many). Rows created after the last Meltano sync are therefore not reported as missing.
+
+**Weekly full refresh.** `dbt_weekly_full_refresh` runs `dbt build --full-refresh` every Sunday at 04:00, so incremental facts drop rows deleted upstream and pick up updates older than the 3-day lookback. Snapshots keep their history.
+
+**Pipeline health in the dashboard.** `gold.ops_quality_daily`, `ops_relation_health`, `ops_dbt_results_daily`, `ops_task_daily` and `ops_alerts` expose the monitoring history to the read-only role (values up to the previous pipeline run). On a new database they are empty instead of failing the build.
 
 `monitoring.alerts` turns rows into **one email** per run (grouped by rule, at most five examples each), sends each problem **once per day**, sends a short **✅ "all checks passed"** when nothing fired, and exits with code 1 on a critical problem so `check_and_alert` turns red.
 
@@ -464,7 +509,9 @@ Both watcher DAGs live in the same Airflow: if the scheduler itself is down, not
 
 ### 7. Airflow orchestration
 
-The DAG runs daily at `02:00` `Asia/Ulaanbaatar`, with `catchup=False`, one active run and one retry per task. Airflow runs in `standalone` mode with the LocalExecutor and its default SQLite metadata database, which is suitable for a single-user learning environment only.
+The DAG runs daily at `02:00` `Asia/Ulaanbaatar`, with `catchup=False`, one active run and one retry per task. Airflow runs in `standalone` mode with the LocalExecutor. Its metadata database is a dedicated PostgreSQL service (`postgres-airflow`, internal only), because SQLite serialises every write and breaks down once several DAGs run at the same time. Set `AIRFLOW_DB_PASSWORD` (URL-safe characters) in `.env` first.
+
+> Moving from the old SQLite metadata starts with a fresh Airflow history (DAG runs, logs, the admin password). Pipeline data and the `monitoring` history are not affected.
 
 ```powershell
 docker compose --profile orchestration up -d --build --wait airflow
@@ -503,7 +550,7 @@ docker compose exec airflow airflow dags pause gaming_source_data_generator   # 
 docker compose --profile dashboard up -d --build --wait dashboard
 ```
 
-Open `http://localhost:8501`. The app connects as `dashboard_user` (Gold only, read-only transactions, 30 s statement timeout) and has six tabs: **Overview**, **Daily KPIs**, **Targets vs actual**, **Campaigns**, **Retention** and **Genre benchmark (RAWG)**. Purchase values in different currencies are never added together; USD figures use the FX reference seed.
+Open `http://localhost:8501`. The app connects as `dashboard_user` (Gold only, read-only transactions, 30 s statement timeout) and has seven tabs: **Overview**, **Daily KPIs**, **Targets vs actual**, **Campaigns**, **Retention**, **Genre benchmark (RAWG)** and **Pipeline health** (quality trend, dbt test results, task durations, recent alerts). Purchase values in different currencies are never added together; USD figures use the FX reference seed.
 
 ### 9. Metadata and lineage (optional)
 
@@ -511,18 +558,30 @@ Open `http://localhost:8501`. The app connects as `dashboard_user` (Gold only, r
 docker compose --profile openmetadata up -d --wait openmetadata-server
 Invoke-RestMethod http://localhost:8585/healthcheck
 docker compose --profile openmetadata run --rm openmetadata-ingestion
+# Business glossary first, so dbt can link models to its terms
+docker compose --profile openmetadata run --rm --entrypoint python openmetadata-ingestion /opt/metadata/create_glossary.py
 .\.venv\Scripts\dbt.exe docs generate --project-dir dbt --profiles-dir dbt
 docker compose --profile openmetadata run --rm --entrypoint metadata openmetadata-ingestion ingest-dbt -c /project/dbt
 ```
 
-dbt descriptions, owners (`meta.owner`), stewards, classification and PII flags appear on the assets in OpenMetadata at `http://localhost:8585`. Stop the stack when not in use; it is memory-intensive.
+What appears in OpenMetadata at `http://localhost:8585`:
+
+| dbt metadata | In OpenMetadata |
+| --- | --- |
+| `description` on models and columns | Asset and column descriptions (`openmetadata_dbt_update_descriptions: true`) |
+| `tags` (`pii` on username / birth_year / country, `silver`, `gold`, `mart`, `ops`) | Tags in the `DataGovernance` classification |
+| `meta.openmetadata.tier` (marts Tier1, core Tier2, ops Tier3) | Tier of each table |
+| `meta.openmetadata.glossary` (e.g. `mart_daily_kpis` → DAU, ARPDAU, ARPPU) | Glossary terms linked to the tables that implement them |
+| `meta.owner`, `meta.data_steward`, `meta.classification` | Custom properties on the asset |
+
+The `GamingAnalytics` glossary (10 terms) is created by `metadata/create_glossary.py`, idempotently. Stop the stack when not in use; it is memory-intensive.
 
 ## Validation, testing and CI
 
 Local checks:
 
 ```powershell
-.\.venv\Scripts\python.exe -m compileall -q ingestion monitoring dashboard tests airflow
+.\.venv\Scripts\python.exe -m compileall -q ingestion monitoring dashboard tests airflow scripts metadata
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 docker compose config --quiet
 ```
@@ -587,17 +646,32 @@ Named Docker volumes preserve database, Airflow, Meltano and OpenMetadata state.
 
 ## Security and deployment notes
 
-- Secrets live only in the ignored `.env` file.
+- Secrets live only in the ignored `.env` file. Run `python -m scripts.check_env` before starting the stack: it reports placeholders, mismatched or reused passwords, short secrets and non-URL-safe characters, without printing any value.
 - PostgreSQL, Airflow, Streamlit and OpenMetadata ports bind to `127.0.0.1`.
 - The dashboard uses a dedicated `dashboard_user` login that can only `SELECT` from Gold, with `default_transaction_read_only` and a statement timeout; it runs as a non-root user without Linux capabilities.
 - Bronze, Silver, snapshots and monitoring are not granted to any BI role; PII stays there.
-- This is not a production deployment: Airflow uses SQLite metadata, there is no HA, no remote secret manager, no TLS termination and no tested disaster-recovery process. The OpenMetadata/OpenSearch configuration is for isolated local learning only.
+- This is not a production deployment: there is no HA, no remote secret manager, no TLS termination and no tested disaster-recovery process. The OpenMetadata/OpenSearch configuration is for isolated local learning only.
 - Database init scripts run only for a new volume. Apply changes to existing databases deliberately (see *Upgrading an existing database*).
+
+### Secrets checklist
+
+| Variable | Used by | How to set it |
+| --- | --- | --- |
+| `POSTGRES_PASSWORD` (+ the same value inside `DATABASE_URL`) | Source and analytics databases, loaders, dbt | `python -c "import secrets; print(secrets.token_urlsafe(24))"` |
+| `DASHBOARD_DB_PASSWORD` | Read-only `dashboard_user` | Its own value, never the owner password |
+| `AIRFLOW_DB_PASSWORD` | Airflow metadata DB | URL-safe characters only (it is part of a connection URL) |
+| `AIRFLOW__API_AUTH__JWT_SECRET` | Airflow API | At least 32 random characters |
+| `AIRFLOW__SMTP__SMTP_PASSWORD` | Alert emails | Gmail: a 16-character App Password with 2-Step Verification on |
+| `OPENMETADATA_MYSQL_ROOT_PASSWORD` | OpenMetadata MySQL | Random; set before the first `openmetadata` start |
+| `OPENMETADATA_DB_USER` / `OPENMETADATA_DB_PASSWORD` | OpenMetadata server | Defaults match the image; change only after `ALTER USER` in MySQL |
+| `OPENMETADATA_JWT_TOKEN`, `RAWG_API_KEY` | Metadata ingestion, RAWG | From the OpenMetadata UI (ingestion-bot) / rawg.io |
 
 ## Troubleshooting
 
 | Symptom | Recommended check |
 | --- | --- |
+| Anything fails to connect after editing `.env` | `python -m scripts.check_env` |
+| `postgres-airflow` does not start | `AIRFLOW_DB_PASSWORD` is empty in `.env` |
 | Docker service does not start | `docker compose ps` and `docker compose logs <service>`; confirm Docker Desktop is running |
 | Python loader cannot connect | Both PostgreSQL services healthy; `.env` settings match the host ports |
 | Meltano plugin or state issues | Rebuild the image, `docker compose run --rm meltano install`, rerun |

@@ -12,6 +12,11 @@ With --window-start/--window-end (append only) every generated timestamp falls
 inside that window, so each scheduled batch looks like the events of that hour
 and its updated_at values are newer than Meltano's incremental bookmark.
 
+Behaviour (ingestion/generate/behavior.py): players churn, a few games are hits,
+sessions follow the Ulaanbaatar day, campaigns in data/business/marketing_campaigns.xlsx
+lift the promoted game, purchases happen inside sessions in the player's local
+currency, and reviews/achievements come from player/game pairs that really played.
+
 Examples:
   python -m ingestion.generate.generate_gaming_data
   python -m ingestion.generate.generate_gaming_data --reset --players 100 --games 20
@@ -28,30 +33,28 @@ import json
 import os
 import random
 import sys
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any, Callable, Sequence, TypeVar
+from pathlib import Path
+from typing import Any, Sequence
 
 import psycopg
 from dotenv import load_dotenv
 from faker import Faker
 
+from ingestion.generate import behavior
 from ingestion.generate.common import (
     ACCOUNT_START,
     ACHIEVEMENT_NAMES,
     BASE_DATE,
+    PAYMENT_METHODS,
     PLATFORM_SEED,
     ROOT,
     TABLES,
     Row,
-    activity_bounds,
     insert_table,
-    make_achievement,
     make_game,
     make_player,
-    make_purchase,
-    make_review,
-    make_session,
     require_source_schema,
     table_counts,
     utc_end_of_day,
@@ -92,9 +95,6 @@ ID_COLUMNS = {
     "reviews": "review_id",
 }
 
-Key = TypeVar("Key")
-
-
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -125,6 +125,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--reset",
         action="store_true",
         help="initial mode only: delete existing source rows before loading.",
+    )
+    parser.add_argument(
+        "--campaigns",
+        type=Path,
+        default=behavior.CAMPAIGNS_WORKBOOK,
+        help="Marketing workbook whose campaigns lift the promoted games (default: "
+        "data/business/marketing_campaigns.xlsx; ignored if missing).",
     )
     parser.add_argument(
         "--window-start",
@@ -187,38 +194,143 @@ def _aware_datetime(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def pick_unique(
-    rng: random.Random,
-    wanted: int,
-    draw: Callable[[], Key],
-    taken: set[Key],
-    enumerate_all: Callable[[], Any],
-) -> set[Key]:
-    """Pick `wanted` new keys not in `taken`: random draws first, then a scan.
+# --- activity simulation (shared by both modes) ------------------------------------
 
-    The scan guarantees termination when the key space is almost full.
+
+def simulate_activity(
+    rng: random.Random,
+    *,
+    players: dict[int, tuple[datetime, str]],
+    games: dict[int, tuple[date, Decimal]],
+    game_platforms: dict[int, list[int]],
+    campaigns: Sequence[behavior.Campaign],
+    period_start: datetime,
+    period_end: datetime,
+    counts: dict[str, int],
+    first_ids: dict[str, int],
+    taken_review_pairs: set[tuple[int, int]],
+    taken_achievements: set[tuple[int, int, str]],
+) -> dict[str, list[Row]]:
+    """Sessions, purchases, reviews and achievements for one period.
+
+    `players` maps id -> (created_at, country); `games` maps id -> (release_date, price_usd).
     """
-    picked: set[Key] = set()
-    attempts, max_attempts = 0, max(1_000, wanted * 20)
-    while len(picked) < wanted and attempts < max_attempts:
-        key = draw()
-        if key not in taken:
-            picked.add(key)
+    out: dict[str, list[Row]] = {"sessions": [], "purchases": [], "reviews": [], "achievements": []}
+    rates = behavior.usd_rates()
+    shaped = (period_end - period_start) > timedelta(days=2)
+
+    # Who can play in this period: account exists and has not churned yet.
+    windows: dict[int, tuple[datetime, datetime]] = {}
+    for player_id, (created_at, _) in players.items():
+        start = max(period_start, created_at)
+        end = min(period_end, behavior.churn_at(created_at, behavior.player_traits(player_id)))
+        if end > start:
+            windows[player_id] = (start, end)
+    if not windows:  # everybody churned: returning players keep a small trickle alive
+        windows = {
+            player_id: (max(period_start, created_at), period_end)
+            for player_id, (created_at, _) in players.items()
+            if created_at < period_end
+        }
+    if not windows or counts["sessions"] == 0:
+        return out
+    player_ids = sorted(windows)
+    player_picker = behavior.WeightedPicker(
+        player_ids,
+        (behavior.player_traits(p).activity * (windows[p][1] - windows[p][0]).total_seconds()
+         for p in player_ids),
+    )
+    playable = sorted(game_id for game_id in games if game_platforms.get(game_id))
+    if not playable:
+        return out
+    popularity = {g: behavior.game_traits(g).popularity for g in playable}
+    game_picker = behavior.WeightedPicker(playable, (popularity[g] for g in playable))
+    playable_set = set(playable)
+    period_campaigns = [
+        campaign for campaign in campaigns
+        if campaign.game_id in playable_set
+        and campaign.start <= period_end.date() and campaign.end >= period_start.date()
+    ]
+
+    # Sessions
+    pair_sessions: dict[tuple[int, int], list[tuple[datetime, datetime]]] = {}
+    for session_id in range(first_ids["sessions"], first_ids["sessions"] + counts["sessions"]):
+        for _ in range(20):
+            player_id = player_picker.pick(rng)
+            started_at = behavior.activity_time(rng, *windows[player_id], shaped=shaped)
+            day = started_at.date()
+            # A campaign multiplies its game's normal share by CAMPAIGN_BOOST: route
+            # the extra (BOOST - 1) x share of sessions to the promoted games.
+            active = [c.game_id for c in period_campaigns if c.start <= day <= c.end]
+            extra = [(behavior.CAMPAIGN_BOOST - 1) * popularity[g] / game_picker.total for g in active]
+            if active and rng.random() < sum(extra):
+                game_id = rng.choices(active, weights=extra)[0]
+            else:
+                game_id = game_picker.pick(rng)
+            if games[game_id][0] <= day:
+                break
+        else:
+            continue  # no released game fits this moment; skip rather than break rules
+        minutes = behavior.session_minutes(rng)
+        ended_at = started_at + timedelta(minutes=minutes)
+        out["sessions"].append(
+            (session_id, player_id, game_id, rng.choice(game_platforms[game_id]),
+             started_at, ended_at, minutes, started_at)
+        )
+        pair_sessions.setdefault((player_id, game_id), []).append((started_at, ended_at))
+
+    sessions = out["sessions"]
+    if not sessions:
+        return out
+
+    # Purchases happen inside sessions; spenders (and whales) buy far more often.
+    session_picker = behavior.WeightedPicker(
+        range(len(sessions)), (behavior.player_traits(row[1]).spend for row in sessions)
+    )
+    for purchase_id in range(first_ids["purchases"], first_ids["purchases"] + counts["purchases"]):
+        _, player_id, game_id, _, started_at, ended_at, _, _ = sessions[session_picker.pick(rng)]
+        purchased_at = min(behavior.activity_time(rng, started_at, ended_at, shaped=False), period_end)
+        currency = behavior.COUNTRY_CURRENCY.get(players[player_id][1], "USD")
+        amount = behavior.purchase_amount(rng, games[game_id][1], currency, rates)
+        out["purchases"].append(
+            (purchase_id, player_id, game_id, purchased_at, amount, currency,
+             rng.choice(PAYMENT_METHODS), purchased_at)
+        )
+
+    # Reviews: one per player/game pair that played; rating follows the game's quality.
+    candidates = sorted(pair for pair in pair_sessions if pair not in taken_review_pairs)
+    chosen = rng.sample(candidates, k=min(counts["reviews"], len(candidates)))
+    for review_id, (player_id, game_id) in enumerate(sorted(chosen), start=first_ids["reviews"]):
+        first_start = min(start for start, _ in pair_sessions[(player_id, game_id)])
+        latest = min(period_end, windows[player_id][1] + timedelta(days=7))
+        review_date = behavior.activity_time(rng, first_start, max(first_start, latest), shaped=False)
+        rating = behavior.review_rating(rng, behavior.game_traits(game_id).quality)
+        out["reviews"].append((review_id, player_id, game_id, rating, review_date, review_date))
+
+    # Achievements: earned during a session of a pair that played.
+    pairs = sorted(pair_sessions)
+    keys: set[tuple[int, int, str]] = set()
+    already = sum(1 for p, g, _ in taken_achievements if (p, g) in pair_sessions)
+    wanted = min(counts["achievements"], max(0, len(pairs) * len(ACHIEVEMENT_NAMES) - already))
+    attempts = 0
+    while len(keys) < wanted and attempts < wanted * 30:
         attempts += 1
-    if len(picked) < wanted:
-        for key in enumerate_all():
-            if key not in taken and key not in picked:
-                picked.add(key)
-                if len(picked) >= wanted:
-                    break
-    return picked
+        player_id, game_id = rng.choice(pairs)
+        key = (player_id, game_id, rng.choice(ACHIEVEMENT_NAMES))
+        if key not in taken_achievements:
+            keys.add(key)
+    for achievement_id, (player_id, game_id, name) in enumerate(sorted(keys), start=first_ids["achievements"]):
+        started_at, ended_at = rng.choice(pair_sessions[(player_id, game_id)])
+        achieved_at = min(behavior.activity_time(rng, started_at, ended_at, shaped=False), period_end)
+        out["achievements"].append((achievement_id, player_id, game_id, name, achieved_at, achieved_at))
+    return out
 
 
 # --- initial mode -----------------------------------------------------------
 
 
 def build_initial_dataset(args: argparse.Namespace) -> dict[str, list[Row]]:
-    """Build a complete dataset in memory; deterministic for a given seed."""
+    """Build a complete dataset in memory; deterministic for a given seed and campaigns file."""
     rng = random.Random(args.seed)
     fake = Faker("en_US")
     fake.seed_instance(args.seed)
@@ -228,58 +340,40 @@ def build_initial_dataset(args: argparse.Namespace) -> dict[str, list[Row]]:
     account_end = utc_start_of_day(args.as_of)
     data: dict[str, list[Row]] = {table: [] for table in TABLES}
 
-    players: dict[int, datetime] = {}
+    players: dict[int, tuple[datetime, str]] = {}
     for player_id in range(1, args.players + 1):
         row = make_player(rng, fake, player_id, account_start, account_end)
-        players[player_id] = row[4]
+        players[player_id] = (row[4], row[2])
         data["players"].append(row)
 
     platform_ids = list(range(1, len(PLATFORM_SEED) + 1))
     for platform_id, (name, manufacturer) in zip(platform_ids, PLATFORM_SEED):
         data["platforms"].append((platform_id, name, manufacturer, activity_start, activity_start))
 
-    games: dict[int, Row] = {}
+    games: dict[int, tuple[date, Decimal]] = {}
     game_platforms: dict[int, list[int]] = {}
     for game_id in range(1, args.games + 1):
         game, pairs = make_game(rng, fake, game_id, args.as_of, platform_ids)
-        games[game_id] = game
+        games[game_id] = (game[4], game[6])
         game_platforms[game_id] = [pair[1] for pair in pairs]
         data["games"].append(game)
         data["game_platforms"].extend(pairs)
 
-    def bounds(player_id: int, game_id: int):
-        return activity_bounds(activity_start, end_of_day, players[player_id], games[game_id][4])
-
-    for session_id in range(1, args.sessions + 1):
-        player_id = rng.randint(1, args.players)
-        game_id = rng.randint(1, args.games)
-        platform_id = rng.choice(game_platforms[game_id])
-        data["sessions"].append(
-            make_session(rng, session_id, player_id, game_id, platform_id, bounds(player_id, game_id))
+    data.update(
+        simulate_activity(
+            rng,
+            players=players,
+            games=games,
+            game_platforms=game_platforms,
+            campaigns=behavior.load_campaigns(args.campaigns),
+            period_start=activity_start,
+            period_end=end_of_day,
+            counts={name: getattr(args, name) for name in ("sessions", "purchases", "reviews", "achievements")},
+            first_ids={"sessions": 1, "purchases": 1, "reviews": 1, "achievements": 1},
+            taken_review_pairs=set(),
+            taken_achievements=set(),
         )
-
-    for purchase_id in range(1, args.purchases + 1):
-        player_id = rng.randint(1, args.players)
-        game_id = rng.randint(1, args.games)
-        data["purchases"].append(
-            make_purchase(rng, purchase_id, player_id, game_id, games[game_id][6], bounds(player_id, game_id))
-        )
-
-    review_pairs: set[tuple[int, int]] = set()
-    while len(review_pairs) < args.reviews:
-        review_pairs.add((rng.randint(1, args.players), rng.randint(1, args.games)))
-    for review_id, (player_id, game_id) in enumerate(sorted(review_pairs), start=1):
-        data["reviews"].append(make_review(rng, review_id, player_id, game_id, bounds(player_id, game_id)))
-
-    achievement_keys: set[tuple[int, int, str]] = set()
-    while len(achievement_keys) < args.achievements:
-        achievement_keys.add(
-            (rng.randint(1, args.players), rng.randint(1, args.games), rng.choice(ACHIEVEMENT_NAMES))
-        )
-    for achievement_id, (player_id, game_id, name) in enumerate(sorted(achievement_keys), start=1):
-        data["achievements"].append(
-            make_achievement(rng, achievement_id, player_id, game_id, name, bounds(player_id, game_id))
-        )
+    )
     return data
 
 
@@ -367,8 +461,11 @@ def run_append(cursor: psycopg.Cursor[Any], args: argparse.Namespace) -> dict[st
         new_game_release = None
 
     # 1. Current state (read only).
-    cursor.execute("SELECT player_id, created_at FROM players ORDER BY player_id")
-    players = {int(player_id): created_at for player_id, created_at in cursor.fetchall()}
+    cursor.execute("SELECT player_id, created_at, country FROM players ORDER BY player_id")
+    players = {
+        int(player_id): (created_at, str(country).strip())
+        for player_id, created_at, country in cursor.fetchall()
+    }
     cursor.execute("SELECT game_id, release_date, price FROM games ORDER BY game_id")
     games = {
         int(game_id): (release_date, Decimal(str(price)))
@@ -398,7 +495,7 @@ def run_append(cursor: psycopg.Cursor[Any], args: argparse.Namespace) -> dict[st
     first_player_id = _max_id(cursor, "players") + 1
     for player_id in range(first_player_id, first_player_id + args.players):
         row = make_player(rng, fake, player_id, account_start, account_end)
-        players[player_id] = row[4]
+        players[player_id] = (row[4], row[2])
         new["players"].append(row)
     insert_table(cursor, "players", new["players"])
 
@@ -415,75 +512,32 @@ def run_append(cursor: psycopg.Cursor[Any], args: argparse.Namespace) -> dict[st
     insert_table(cursor, "game_platforms", new["game_platforms"])
 
     # 4. Activity across old and new players/games.
-    player_ids = list(players)
-    game_ids = list(games)
-    wants_activity = args.sessions or args.purchases or args.reviews or args.achievements
-    if wants_activity and (not player_ids or not game_ids):
-        raise SystemExit(
-            "No players or games exist yet. Run --mode initial first, or append players and games."
-        )
-    playable_game_ids = [game_id for game_id in game_ids if game_platforms.get(game_id)]
-    if args.sessions and not playable_game_ids:
-        raise SystemExit("No game has a supported platform, so sessions cannot be generated.")
-
-    def bounds(player_id: int, game_id: int):
-        return activity_bounds(activity_start, end_of_day, players[player_id], games[game_id][0])
-
-    first_session_id = _max_id(cursor, "sessions") + 1
-    for session_id in range(first_session_id, first_session_id + args.sessions):
-        player_id = rng.choice(player_ids)
-        game_id = rng.choice(playable_game_ids)
-        platform_id = rng.choice(game_platforms[game_id])
-        new["sessions"].append(
-            make_session(rng, session_id, player_id, game_id, platform_id, bounds(player_id, game_id))
-        )
-    insert_table(cursor, "sessions", new["sessions"])
-
-    first_purchase_id = _max_id(cursor, "purchases") + 1
-    for purchase_id in range(first_purchase_id, first_purchase_id + args.purchases):
-        player_id = rng.choice(player_ids)
-        game_id = rng.choice(game_ids)
-        new["purchases"].append(
-            make_purchase(rng, purchase_id, player_id, game_id, games[game_id][1], bounds(player_id, game_id))
-        )
-    insert_table(cursor, "purchases", new["purchases"])
-
-    # Reviews: one per player/game pair.
+    if not players or not games:
+        if args.sessions or args.purchases or args.reviews or args.achievements:
+            raise SystemExit(
+                "No players or games exist yet. Run --mode initial first, or append players and games."
+            )
     cursor.execute("SELECT player_id, game_id FROM reviews")
     taken_pairs = {(int(p), int(g)) for p, g in cursor.fetchall()}
-    review_count = min(args.reviews, max(0, len(player_ids) * len(game_ids) - len(taken_pairs)))
-    review_pairs = pick_unique(
-        rng,
-        review_count,
-        lambda: (rng.choice(player_ids), rng.choice(game_ids)),
-        taken_pairs,
-        lambda: ((p, g) for p in player_ids for g in game_ids),
-    )
-    first_review_id = _max_id(cursor, "reviews") + 1
-    for review_id, (player_id, game_id) in enumerate(sorted(review_pairs), start=first_review_id):
-        new["reviews"].append(make_review(rng, review_id, player_id, game_id, bounds(player_id, game_id)))
-    insert_table(cursor, "reviews", new["reviews"])
-
-    # Achievements: one per player/game/achievement name.
     cursor.execute("SELECT player_id, game_id, achievement_name FROM achievements")
     taken_keys = {(int(p), int(g), name) for p, g, name in cursor.fetchall()}
-    capacity = len(player_ids) * len(game_ids) * len(ACHIEVEMENT_NAMES)
-    achievement_count = min(args.achievements, max(0, capacity - len(taken_keys)))
-    achievement_keys = pick_unique(
+    activity = simulate_activity(
         rng,
-        achievement_count,
-        lambda: (rng.choice(player_ids), rng.choice(game_ids), rng.choice(ACHIEVEMENT_NAMES)),
-        taken_keys,
-        lambda: ((p, g, n) for p in player_ids for g in game_ids for n in ACHIEVEMENT_NAMES),
+        players=players,
+        games=games,
+        game_platforms=game_platforms,
+        campaigns=behavior.load_campaigns(args.campaigns),
+        period_start=activity_start,
+        period_end=end_of_day,
+        counts={name: getattr(args, name) for name in ("sessions", "purchases", "reviews", "achievements")},
+        first_ids={table: _max_id(cursor, table) + 1
+                   for table in ("sessions", "purchases", "reviews", "achievements")},
+        taken_review_pairs=taken_pairs,
+        taken_achievements=taken_keys,
     )
-    first_achievement_id = _max_id(cursor, "achievements") + 1
-    for achievement_id, (player_id, game_id, name) in enumerate(
-        sorted(achievement_keys), start=first_achievement_id
-    ):
-        new["achievements"].append(
-            make_achievement(rng, achievement_id, player_id, game_id, name, bounds(player_id, game_id))
-        )
-    insert_table(cursor, "achievements", new["achievements"])
+    for table in ("sessions", "purchases", "reviews", "achievements"):
+        new[table] = activity[table]
+        insert_table(cursor, table, new[table])
 
     _sync_sequences(cursor)
     report: dict[str, Any] = {"mode": "append", **table_counts(cursor)}

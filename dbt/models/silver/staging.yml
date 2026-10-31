@@ -4,21 +4,24 @@ models:
   - name: stg_players
     description: Typed players from Bronze. Holds personal data; not granted to BI roles.
     config:
-      meta: {owner: platform-engineering, data_steward: player-data-steward, classification: confidential, contains_pii: true}
+      meta: {owner: platform-engineering, data_steward: player-data-steward, classification: confidential, contains_pii: true, openmetadata: {glossary: ["GamingAnalytics.PersonalData"]}}
     columns:
       - name: player_id
         data_tests: [not_null, unique]
       - name: username
         description: Direct identifier (PII). Never exposed in Gold.
         config:
+          tags: ["pii"]
           meta: {pii: true, pii_type: direct_identifier}
         data_tests: [not_null, unique]
       - name: birth_year
         description: Personal data (PII). Generalised to age_band in Gold.
         config:
+          tags: ["pii"]
           meta: {pii: true, pii_type: quasi_identifier}
       - name: country
         config:
+          tags: ["pii"]
           meta: {pii: true, pii_type: quasi_identifier}
   - name: stg_platforms
     columns:

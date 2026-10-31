@@ -9,6 +9,7 @@ shrinking tables) visible at all:
     monitoring.dbt_node_results   one row per dbt node per invocation
     monitoring.task_runs          one row per Airflow task try
     monitoring.alert_log          one row per alert that fired (sent or not)
+    monitoring.reconciliation     source vs Bronze row counts per table per check
 """
 
 from __future__ import annotations
@@ -63,6 +64,17 @@ CREATE TABLE IF NOT EXISTS monitoring.alert_log (
 );
 CREATE INDEX IF NOT EXISTS idx_alert_log_date_check
     ON monitoring.alert_log (alert_date, check_name, object);
+
+CREATE TABLE IF NOT EXISTS monitoring.reconciliation (
+    checked_at TIMESTAMPTZ NOT NULL,
+    table_name TEXT NOT NULL,
+    compared_up_to TIMESTAMPTZ,
+    source_rows BIGINT,
+    bronze_rows BIGINT,
+    difference BIGINT,
+    status TEXT NOT NULL,
+    PRIMARY KEY (checked_at, table_name)
+);
 """
 
 # Day boundaries for "once per day" and "did it run today" (business time zone).
