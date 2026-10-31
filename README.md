@@ -524,10 +524,10 @@ docker compose --profile orchestration up -d --build --wait airflow
 docker compose exec airflow airflow dags list-import-errors
 docker compose exec airflow airflow tasks list gaming_analytics_pipeline
 docker compose exec airflow airflow dags trigger gaming_analytics_pipeline
-docker compose exec airflow cat /opt/airflow/standalone_admin_password.txt
+docker compose exec airflow cat /opt/airflow/simple_auth_manager_passwords.json.generated   # Airflow 3: {"admin": "..."}
 ```
 
-The UI is at `http://localhost:8080`; the last command prints the local admin password created on first start.
+The UI is at `http://localhost:8080`; the last command prints the admin password that Airflow 3's simple auth manager generated on first start (if the file is missing: `docker compose logs airflow | grep -i password`).
 
 ### 7a. Hourly source traffic (`gaming_source_data_generator`)
 

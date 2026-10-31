@@ -43,13 +43,13 @@ models:
         data_type: bigint
       - name: revenue_usd
         description: Purchase value converted to USD with the illustrative FX seed.
-        data_type: numeric
+        data_type: numeric(14, 2)
       - name: arpdau_usd
         description: Average revenue per daily active player (USD).
-        data_type: numeric
+        data_type: numeric(14, 4)
       - name: arppu_usd
         description: Average revenue per paying player (USD); null on days without purchases.
-        data_type: numeric
+        data_type: numeric(14, 4)
 
   - name: mart_game_target_vs_actual
     description: >

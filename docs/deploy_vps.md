@@ -163,7 +163,7 @@ run_project -m ingestion.generate.generate_gaming_data
 docker compose --profile orchestration up -d --wait airflow
 docker compose exec airflow airflow dags list-import-errors     # "No data found" байх ёстой
 docker compose exec airflow airflow dags list | grep -E 'gaming|pipeline|dbt|alert'
-docker compose exec airflow cat /opt/airflow/standalone_admin_password.txt
+docker compose exec airflow cat /opt/airflow/simple_auth_manager_passwords.json.generated   # Airflow 3: {"admin": "..."}
 ```
 
 **Юу болдог:** `postgres-airflow` metadata DB, scheduler, API/UI асна. 5 DAG харагдана:
@@ -177,7 +177,9 @@ DAG-ууд pause-гүй үүсдэг (`catchup=False`), тиймээс Airflow �
 - `dbt_weekly_full_refresh` **pause-тай** үүснэ (өдрийн dbt-тэй зэрэг ажиллахаас сэргийлж). Pipeline
   амжилттай болсны дараа UI-аас эсвэл `airflow dags unpause dbt_weekly_full_refresh`-ээр асаана.
 
-**Амжилт:** import error байхгүй; 5 DAG жагсаалтад байна.
+**Амжилт:** import error байхгүй; 5 DAG жагсаалтад байна. Нууц үг: Airflow 3-ийн simple auth manager
+`simple_auth_manager_passwords.json.generated`-д `{"admin": "..."}` хэлбэрээр хадгална (файл
+олдохгүй бол `docker compose logs airflow | grep -i password`).
 
 ---
 

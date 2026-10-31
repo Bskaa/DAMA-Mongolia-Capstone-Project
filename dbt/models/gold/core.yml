@@ -300,5 +300,6 @@ unit_tests:
           - {campaign_id: 1, budget: 1000, actual_spend: 250}
     expect:
       rows:
-        - {campaign_id: 1, campaign_days: 10, remaining_budget: 750, budget_spend_ratio: 0.25}
+        # numerics are compared in their exact scale: 750.00 (numeric(12,2)), 0.2500 (numeric(10,4))
+        - {campaign_id: 1, campaign_days: 10, remaining_budget: '750.00', budget_spend_ratio: '0.2500'}
         - {campaign_id: 2, campaign_days: 1, remaining_budget: null, budget_spend_ratio: null}
