@@ -16,7 +16,17 @@ from pathlib import Path
 from typing import Mapping
 from urllib.parse import unquote, urlparse
 
-from dotenv import dotenv_values
+try:
+    from dotenv import dotenv_values
+except ImportError:  # e.g. a fresh VPS without the project's virtualenv
+    def dotenv_values(path):  # type: ignore[no-redef]
+        values = {}
+        for line in Path(path).read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, value = line.split("=", 1)
+                values[key.replace("export ", "").strip()] = value.strip().strip('"').strip("'")
+        return values
 
 PLACEHOLDER = re.compile(r"change-this|ci-only-placeholder|^password$|^changeme$", re.IGNORECASE)
 URL_SAFE = re.compile(r"^[A-Za-z0-9._~-]+$")

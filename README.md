@@ -143,7 +143,11 @@ Other DAGs: `gaming_source_data_generator` (hourly synthetic traffic), `pipeline
 │   ├── reconcile.py                      # Source vs Bronze row counts
 │   ├── checks.sql                        # The 14 alert rules
 │   └── alerts.py                         # Rules -> one email + monitoring.alert_log
-├── scripts/check_env.py                  # .env security audit
+├── docs/deploy_vps.md                    # Step-by-step VPS deployment and end-to-end check
+├── scripts/
+│   ├── check_env.py                      # .env security audit
+│   ├── generate_env.py                   # .env with fresh random secrets
+│   └── vps_preflight.sh                  # Is this server ready? (RAM, Docker, ports, network)
 ├── sql/                                  # Source DDL, Bronze DDL, migrations, access roles
 ├── tests/                                # Python unit tests and CI fixtures
 ├── .env.example
@@ -292,6 +296,8 @@ docker compose config --quiet
 ```
 
 ## Quick start
+
+Deploying to a server (VPS)? Follow [docs/deploy_vps.md](docs/deploy_vps.md): preflight check, generated secrets, and a verified run of every DAG.
 
 ```powershell
 # 1. Start the source and analytics databases.
@@ -489,7 +495,7 @@ The warehouse tables describe the business; the `monitoring` schema describes th
 
 **Reconciliation.** For each replicated table, with `bound` = the newest `updated_at` in Bronze: every source row with `updated_at <= bound` must be in Bronze, and Bronze cannot have more rows than the source (for append-only event tables, exactly as many). Rows created after the last Meltano sync are therefore not reported as missing.
 
-**Weekly full refresh.** `dbt_weekly_full_refresh` runs `dbt build --full-refresh` every Sunday at 04:00, so incremental facts drop rows deleted upstream and pick up updates older than the 3-day lookback. Snapshots keep their history.
+**Weekly full refresh.** `dbt_weekly_full_refresh` (created paused: unpause it after the first successful daily run) runs `dbt build --full-refresh` every Sunday at 04:00, so incremental facts drop rows deleted upstream and pick up updates older than the 3-day lookback. Snapshots keep their history.
 
 **Pipeline health in the dashboard.** `gold.ops_quality_daily`, `ops_relation_health`, `ops_dbt_results_daily`, `ops_task_daily` and `ops_alerts` expose the monitoring history to the read-only role (values up to the previous pipeline run). On a new database they are empty instead of failing the build.
 

@@ -7,7 +7,8 @@ late update older than the lookback is never picked up. Once a week, while the
 daily pipeline is idle, everything is rebuilt from scratch so Gold converges to
 Silver again. Snapshots are not affected by --full-refresh, so SCD2 history is kept.
 
-Sunday 04:00 Asia/Ulaanbaatar (the daily pipeline runs at 02:00 and usually
+Created paused (see is_paused_upon_creation); unpause after the first successful
+daily run. Sunday 04:00 Asia/Ulaanbaatar (the daily pipeline runs at 02:00 and usually
 finishes well before). Results are stored like the daily run's, so the alert
 rules see a failing weekly rebuild too.
 """
@@ -47,6 +48,9 @@ with DAG(
     schedule="0 4 * * 0",
     catchup=False,
     max_active_runs=1,
+    # Created paused: on a fresh Airflow it would otherwise run immediately for the last
+    # Sunday, at the same time as the first daily pipeline. Unpause once that succeeded.
+    is_paused_upon_creation=True,
     default_args={
         "owner": "gaming-analytics",
         "retries": 1,
