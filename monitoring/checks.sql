@@ -152,11 +152,22 @@ WHERE latest_dbt.status = 'warn'
 
 UNION ALL
 
--- 9 . RUNS . a task failed today (after its retries) ------------------------------
-SELECT 'critical', 'task_failed', dag_id || ' . ' || task_id,
-       'try ' || try_number || ' . run ' || run_id
-FROM final_tries
-WHERE state = 'failed' AND ended_at::date = current_date
+-- 9 . RUNS . a task failed today (after its retries) and is still broken -----------
+-- A failure that a later run of the same task fixed is history, not a problem: without
+-- this, one red run in the morning keeps check_and_alert red for the rest of the day.
+-- The alerting tasks themselves are left out (their failure IS the alert, and counting
+-- it would make every later check_and_alert fail too), and so is the alert drill.
+SELECT 'critical', 'task_failed', failed.dag_id || ' . ' || failed.task_id,
+       'try ' || failed.try_number || ' . run ' || failed.run_id
+FROM final_tries AS failed
+WHERE failed.state = 'failed' AND failed.ended_at::date = current_date
+  AND failed.dag_id <> 'alert_drill'
+  AND failed.task_id NOT IN ('check_and_alert', 'watchdog')
+  AND NOT EXISTS (
+      SELECT 1 FROM final_tries AS later
+      WHERE later.dag_id = failed.dag_id AND later.task_id = failed.task_id
+        AND later.state = 'success' AND later.ended_at > failed.ended_at
+  )
 
 UNION ALL
 
