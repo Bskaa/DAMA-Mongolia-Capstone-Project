@@ -3,21 +3,75 @@ version: 2
 sources:
   - name: bronze
     schema: bronze
-    description: Bronze landing area populated by Meltano, RAWG, and Excel ingestion.
+    description: >
+      Bronze landing area. Data arrives unchanged from three systems: Meltano
+      replication of the operational source database, the RAWG public API and
+      business-maintained Excel workbooks. Only ingestion processes write here.
     tables:
+      # Meltano / operational source -------------------------------------------
       - name: players
+        description: Registered players. Contains personal data (username, birth year, country).
+        config:
+          meta: {source_system: operational_db, ingestion: meltano, owner: platform-engineering, contains_pii: true}
       - name: platforms
+        description: Gaming platforms (PC, consoles, mobile).
+        config:
+          meta: {source_system: operational_db, ingestion: meltano, owner: platform-engineering}
       - name: games
+        description: Game catalogue of the operational system.
+        config:
+          meta: {source_system: operational_db, ingestion: meltano, owner: platform-engineering}
       - name: game_platforms
+        description: Supported game/platform pairs.
+        config:
+          meta: {source_system: operational_db, ingestion: meltano, owner: platform-engineering}
       - name: sessions
+        description: Play sessions (event data, incremental on updated_at).
+        config:
+          meta: {source_system: operational_db, ingestion: meltano, owner: platform-engineering}
       - name: purchases
+        description: In-game purchases in the original currency (incremental on updated_at).
+        config:
+          meta: {source_system: operational_db, ingestion: meltano, owner: platform-engineering}
       - name: achievements
+        description: Achievements earned by players (incremental on updated_at).
+        config:
+          meta: {source_system: operational_db, ingestion: meltano, owner: platform-engineering}
       - name: reviews
+        description: Player ratings of games (incremental on updated_at).
+        config:
+          meta: {source_system: operational_db, ingestion: meltano, owner: platform-engineering}
+      # RAWG public API --------------------------------------------------------
       - name: rawg_games
+        description: External RAWG game catalogue; raw_payload keeps the full API record.
+        config:
+          meta: {source_system: rawg_api, ingestion: python, owner: analytics-engineering, license: RAWG attribution required}
       - name: rawg_platforms
+        config:
+          meta: {source_system: rawg_api, ingestion: python, owner: analytics-engineering}
       - name: rawg_genres
+        config:
+          meta: {source_system: rawg_api, ingestion: python, owner: analytics-engineering}
       - name: rawg_publishers
+        config:
+          meta: {source_system: rawg_api, ingestion: python, owner: analytics-engineering}
       - name: rawg_developers
+        config:
+          meta: {source_system: rawg_api, ingestion: python, owner: analytics-engineering}
+      # Excel business workbooks ----------------------------------------------
       - name: raw_marketing_campaigns
+        description: Current snapshot of marketing_campaigns.xlsx.
+        config:
+          meta: {source_system: excel, ingestion: python, owner: marketing, data_steward: marketing-lead}
       - name: raw_game_targets
+        description: Current snapshot of game_targets.xlsx.
+        config:
+          meta: {source_system: excel, ingestion: python, owner: product, data_steward: product-lead}
       - name: raw_campaign_budget
+        description: Current snapshot of budget.xlsx.
+        config:
+          meta: {source_system: excel, ingestion: python, owner: finance, data_steward: finance-lead}
+      - name: business_record_history
+        description: Append-only history of every Excel record ever loaded, keyed by load_id.
+        config:
+          meta: {source_system: excel, ingestion: python, owner: analytics-engineering}

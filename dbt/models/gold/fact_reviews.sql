@@ -1,6 +1,7 @@
 select
     review_id,
-    review_date::date as date_day,
+    {{ date_key(reporting_date('review_date')) }} as date_key,
+    {{ reporting_date('review_date') }} as date_day,
     review_date,
     player_id,
     game_id,

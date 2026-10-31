@@ -13,7 +13,7 @@ from typing import Any
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
-from airflow.exceptions import AirflowException
+from airflow.exceptions import AirflowException, AirflowSkipException
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG
 from airflow.task.trigger_rule import TriggerRule
@@ -80,19 +80,35 @@ def run_meltano() -> None:
 
 
 def run_rawg() -> None:
+    """Refresh the external RAWG catalogue.
+
+    RAWG only feeds the genre benchmark, so an unavailable API (or a missing
+    key) must not stop the core pipeline: the task is marked *skipped* and
+    dbt rebuilds the benchmark from the previously loaded RAWG data.
+    """
     environment = _project_environment()
+    if not environment.get("RAWG_API_KEY", "").strip():
+        raise AirflowSkipException(
+            "RAWG_API_KEY is not set; keeping the previously loaded RAWG catalogue."
+        )
     max_pages = environment.get("RAWG_MAX_PAGES", "5")
-    _run(
-        [
-            str(VENV / "bin" / "python"),
-            "-m",
-            "ingestion.api.rawg",
-            "--max-pages",
-            max_pages,
-        ],
-        PROJECT_ROOT,
-        environment,
-    )
+    try:
+        _run(
+            [
+                str(VENV / "bin" / "python"),
+                "-m",
+                "ingestion.api.rawg",
+                "--max-pages",
+                max_pages,
+            ],
+            PROJECT_ROOT,
+            environment,
+        )
+    except subprocess.CalledProcessError as error:
+        raise AirflowSkipException(
+            f"RAWG ingestion failed (exit code {error.returncode}); "
+            "keeping the previously loaded RAWG catalogue."
+        ) from error
 
 
 def load_business_workbooks() -> None:
@@ -103,11 +119,11 @@ def load_business_workbooks() -> None:
     )
 
 
-def run_dbt() -> None:
+def _dbt(command: list[str]) -> None:
     _run(
         [
             str(VENV / "bin" / "dbt"),
-            "run",
+            *command,
             "--project-dir",
             str(PROJECT_ROOT / "dbt"),
             "--profiles-dir",
@@ -122,23 +138,13 @@ def run_dbt() -> None:
     )
 
 
-def test_dbt() -> None:
-    _run(
-        [
-            str(VENV / "bin" / "dbt"),
-            "test",
-            "--project-dir",
-            str(PROJECT_ROOT / "dbt"),
-            "--profiles-dir",
-            str(PROJECT_ROOT / "dbt"),
-            "--target-path",
-            "/tmp/dbt-target",
-            "--log-path",
-            "/tmp/dbt-logs",
-        ],
-        PROJECT_ROOT,
-        _project_environment(),
-    )
+def build_dbt() -> None:
+    """Seeds, snapshots, models and tests in one DAG-ordered run.
+
+    `dbt build` tests each model right after building it and skips everything
+    downstream of a failing test, so bad data never reaches Gold.
+    """
+    _dbt(["build"])
 
 
 def monitor_data_quality(**context: Any) -> dict[str, Any]:
@@ -169,25 +175,32 @@ def monitor_data_quality(**context: Any) -> dict[str, Any]:
     return summary
 
 
-def notify_data_quality(**context: Any) -> None:
-    recipient_setting = os.environ.get("QUALITY_ALERT_EMAIL_TO", "").strip()
-    smtp_host = os.environ.get("AIRFLOW__SMTP__SMTP_HOST", "").strip()
-    sender = os.environ.get("AIRFLOW__SMTP__SMTP_MAIL_FROM", "").strip()
-    smtp_port = os.environ.get("AIRFLOW__SMTP__SMTP_PORT", "").strip()
-    missing = [
+def missing_email_settings(environment: dict[str, str]) -> list[str]:
+    """Names of the settings that must be filled in before a report can be emailed."""
+    return [
         name
-        for name, value in (
-            ("QUALITY_ALERT_EMAIL_TO", recipient_setting),
-            ("AIRFLOW__SMTP__SMTP_HOST", smtp_host),
-            ("AIRFLOW__SMTP__SMTP_PORT", smtp_port),
-            ("AIRFLOW__SMTP__SMTP_MAIL_FROM", sender),
+        for name in (
+            "QUALITY_ALERT_EMAIL_TO",
+            "AIRFLOW__SMTP__SMTP_HOST",
+            "AIRFLOW__SMTP__SMTP_PORT",
+            "AIRFLOW__SMTP__SMTP_MAIL_FROM",
         )
-        if not value
+        if not environment.get(name, "").strip()
     ]
+
+
+def notify_data_quality(**context: Any) -> None:
+    if os.environ.get("QUALITY_EMAIL_ENABLED", "true").strip().lower() in ("0", "false", "no"):
+        raise AirflowSkipException("Email report disabled by QUALITY_EMAIL_ENABLED=false.")
+    missing = missing_email_settings(dict(os.environ))
     if missing:
-        raise AirflowException(
-            "Email notification is not configured; set " + ", ".join(missing) + " in .env"
+        # Optional feature: not configuring email must not turn the run red.
+        raise AirflowSkipException(
+            "Email notification is not configured (missing " + ", ".join(missing) + "); "
+            "the quality summary is still available in the monitor_data_quality XCom "
+            "and in the monitoring schema."
         )
+    recipient_setting = os.environ["QUALITY_ALERT_EMAIL_TO"].strip()
     recipients = [
         address.strip() for address in recipient_setting.split(",") if address.strip()
     ]
@@ -306,13 +319,12 @@ with DAG(
         task_id="load_business_workbooks",
         python_callable=load_business_workbooks,
     )
-    build_dbt = PythonOperator(
-        task_id="build_dbt_models",
-        python_callable=run_dbt,
-    )
-    validate_dbt = PythonOperator(
-        task_id="test_dbt_models",
-        python_callable=test_dbt,
+    build_dbt_models = PythonOperator(
+        task_id="dbt_build",
+        python_callable=build_dbt,
+        # Runs when the core loads succeeded; a skipped (unavailable) RAWG
+        # refresh is fine because dbt reuses the previous RAWG data.
+        trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
     )
     monitor_quality = PythonOperator(
         task_id="monitor_data_quality",
@@ -325,13 +337,10 @@ with DAG(
         trigger_rule=TriggerRule.ALL_DONE,
     )
 
-    (
-        check_databases
-        >> sync_source
-        >> ingest_rawg
-        >> load_excel
-        >> build_dbt
-        >> validate_dbt
-        >> monitor_quality
-        >> send_quality_report
-    )
+    # Source replication and the RAWG refresh are independent and run in
+    # parallel; the Excel loader validates game IDs against bronze.games, so it
+    # waits for Meltano.
+    check_databases >> [sync_source, ingest_rawg]
+    sync_source >> load_excel
+    [load_excel, ingest_rawg] >> build_dbt_models
+    build_dbt_models >> monitor_quality >> send_quality_report

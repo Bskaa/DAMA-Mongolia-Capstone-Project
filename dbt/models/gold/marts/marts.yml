@@ -1,0 +1,111 @@
+version: 2
+
+# Gold marts answer specific business questions and feed the dashboard.
+# Business glossary (also loaded into OpenMetadata as descriptions):
+#   DAU     - distinct players with at least one session on the day
+#   ARPDAU  - revenue_usd / DAU for the day
+#   ARPPU   - revenue_usd / paying players for the day
+#   Retention rate - share of a monthly cohort active N months after its first session
+
+models:
+  - name: mart_daily_kpis
+    description: Daily engagement and monetisation KPIs (DAU, new players, revenue, ARPDAU, ARPPU).
+    config:
+      contract:
+        enforced: true
+      meta: {owner: analytics-engineering, classification: internal, grain: day}
+    columns:
+      - name: date_key
+        data_type: integer
+        constraints:
+          - type: not_null
+        data_tests:
+          - unique
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_key
+      - name: date_day
+        data_type: date
+      - name: sessions
+        data_type: bigint
+      - name: daily_active_players
+        description: DAU - distinct players with a session that day.
+        data_type: bigint
+      - name: new_players
+        description: Players whose first ever session was on this day.
+        data_type: bigint
+      - name: play_minutes
+        data_type: bigint
+      - name: purchases
+        data_type: bigint
+      - name: paying_players
+        data_type: bigint
+      - name: revenue_usd
+        description: Purchase value converted to USD with the illustrative FX seed.
+        data_type: numeric
+      - name: arpdau_usd
+        description: Average revenue per daily active player (USD).
+        data_type: numeric
+      - name: arppu_usd
+        description: Average revenue per paying player (USD); null on days without purchases.
+        data_type: numeric
+
+  - name: mart_game_target_vs_actual
+    description: >
+      Actual sessions, players, revenue and rating of each game against the
+      targets in game_targets.xlsx. Targets are compared with all warehouse
+      activity because the workbook has no target period.
+    config:
+      meta: {owner: product, data_steward: product-lead, classification: internal, grain: game}
+    columns:
+      - name: game_id
+        data_tests:
+          - not_null
+          - unique
+          - relationships:
+              arguments:
+                to: ref('dim_games')
+                field: game_id
+      - name: revenue_attainment
+        description: actual_revenue_usd / target_revenue (1.0 = target met).
+      - name: rating_gap
+        description: Actual average rating minus target rating.
+
+  - name: mart_campaign_performance
+    description: >
+      Revenue of the promoted game during each campaign versus an equally long
+      window just before it, with uplift ROI relative to actual spend.
+    config:
+      meta: {owner: marketing, data_steward: marketing-lead, classification: confidential, grain: campaign}
+    columns:
+      - name: campaign_id
+        data_tests: [not_null, unique]
+      - name: uplift_roi
+        description: (campaign revenue - baseline revenue) / actual spend. Correlational, not causal.
+
+  - name: mart_player_retention
+    description: Monthly cohort retention table (cohort = month of first session).
+    config:
+      meta: {owner: analytics-engineering, classification: internal, grain: cohort_month x months_since_first_session}
+    columns:
+      - name: cohort_month
+        data_tests: [not_null]
+      - name: months_since_first_session
+        data_tests: [not_null]
+      - name: retention_rate
+        description: active_players / cohort_players.
+        data_tests: [not_null]
+
+  - name: mart_genre_benchmark
+    description: >
+      Our games compared with the external RAWG catalogue by genre (rating,
+      Metacritic, playtime). Genre is the only attribute shared by both sources.
+      Display RAWG attribution wherever this data is shown.
+    config:
+      meta: {owner: analytics-engineering, classification: public, external_source: rawg_api, grain: genre}
+    columns:
+      - name: genre
+        data_tests: [not_null, unique]
+      - name: rating_gap_vs_rawg
+        description: Our average review rating minus the RAWG average rating for the genre.

@@ -1,27 +1,105 @@
 version: 2
 
+# Gold core: Kimball-style dimensions and facts. Every model is readable by the
+# analytics_reader role (see dbt_project.yml +grants). Meta keys used for
+# governance: owner, data_steward, classification (public | internal |
+# confidential), contains_pii, dq_dimension on tests is documented in README.
+
 models:
   - name: dim_date
+    description: Calendar dimension from the first activity day to one year after today.
+    config:
+      meta: {owner: analytics-engineering, classification: public}
     columns:
       - name: date_key
+        description: Surrogate key in YYYYMMDD form; facts join on this column.
         data_tests: [not_null, unique]
       - name: date_day
+        description: Calendar date in the reporting time zone (var reporting_timezone).
         data_tests: [not_null, unique]
+      - name: month_start
+        description: First day of the month, used for monthly roll-ups.
+
   - name: dim_players
+    description: >
+      Current player attributes. Direct identifiers are intentionally excluded
+      (username stays in Silver) and birth year is generalised to an age band.
+    config:
+      meta: {owner: platform-engineering, data_steward: player-data-steward, classification: internal, contains_pii: false}
     columns:
       - name: player_id
+        description: Pseudonymous player identifier.
         data_tests: [not_null, unique]
-      - name: username
+      - name: country
+        description: ISO 3166-1 alpha-2 country code (quasi-identifier).
+        config:
+          meta: {classification: internal, quasi_identifier: true}
+      - name: age_band
+        description: Age band derived from birth year; replaces the exact birth year.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['under_18', '18_24', '25_34', '35_44', '45_54', '55_plus', 'unknown']
+
+  - name: dim_players_history
+    description: SCD Type 2 history of player attributes from the snap_players snapshot.
+    config:
+      meta: {owner: platform-engineering, classification: internal}
+    columns:
+      - name: player_version_key
+        description: Surrogate key of one player version.
+        data_tests: [not_null, unique]
+      - name: player_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_players')
+                field: player_id
+      - name: valid_from
         data_tests: [not_null]
+
   - name: dim_games
+    description: Current game catalogue enriched with business targets from game_targets.xlsx.
+    config:
+      meta: {owner: product, data_steward: product-lead, classification: internal}
     columns:
       - name: game_id
+        description: Game identifier from the operational system.
         data_tests: [not_null, unique]
+      - name: price
+        description: Current list price in USD.
+      - name: target_revenue
+        description: Revenue target (USD) from the product team's workbook.
+
+  - name: dim_games_history
+    description: SCD Type 2 history of game price and genre from the snap_games snapshot.
+    config:
+      meta: {owner: product, classification: internal}
+    columns:
+      - name: game_version_key
+        data_tests: [not_null, unique]
+      - name: game_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_games')
+                field: game_id
+
   - name: dim_platforms
+    description: Gaming platforms.
+    config:
+      meta: {owner: platform-engineering, classification: public}
     columns:
       - name: platform_id
         data_tests: [not_null, unique]
+
   - name: bridge_game_platforms
+    description: One row per supported game/platform pair (many-to-many bridge).
+    config:
+      meta: {owner: platform-engineering, classification: public}
     columns:
       - name: game_id
         data_tests:
@@ -37,17 +115,24 @@ models:
               arguments:
                 to: ref('dim_platforms')
                 field: platform_id
+
   - name: fact_sessions
+    description: >
+      One row per play session. Incremental (delete+insert on session_id) with
+      a lookback window on updated_at; run with --full-refresh after deletions.
+    config:
+      meta: {owner: platform-engineering, classification: internal, grain: session}
     columns:
       - name: session_id
         data_tests: [not_null, unique]
-      - name: date_day
+      - name: date_key
+        description: Session start day; joins to dim_date.date_key.
         data_tests:
           - not_null
           - relationships:
               arguments:
                 to: ref('dim_date')
-                field: date_day
+                field: date_key
       - name: player_id
         data_tests:
           - not_null
@@ -69,17 +154,25 @@ models:
               arguments:
                 to: ref('dim_platforms')
                 field: platform_id
+      - name: duration_minutes
+        data_tests: [not_null]
+
   - name: fact_purchases
+    description: >
+      One row per purchase. amount is in the original currency; amount_usd is
+      converted with the illustrative fx_rates_to_usd seed.
+    config:
+      meta: {owner: finance, data_steward: finance-lead, classification: confidential, grain: purchase}
     columns:
       - name: purchase_id
         data_tests: [not_null, unique]
-      - name: date_day
+      - name: date_key
         data_tests:
           - not_null
           - relationships:
               arguments:
                 to: ref('dim_date')
-                field: date_day
+                field: date_key
       - name: player_id
         data_tests:
           - not_null
@@ -95,18 +188,34 @@ models:
                 to: ref('dim_games')
                 field: game_id
       - name: amount
+        description: Purchase amount in the original currency.
         data_tests: [not_null]
+      - name: currency
+        description: ISO 4217 code; must exist in the fx_rates_to_usd reference data.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('fx_rates_to_usd')
+                field: currency
+      - name: amount_usd
+        description: Amount converted to USD (null only if a currency has no rate).
+        data_tests: [not_null]
+
   - name: fact_reviews
+    description: One row per player review (one review per player and game).
+    config:
+      meta: {owner: product, classification: internal, grain: review}
     columns:
       - name: review_id
         data_tests: [not_null, unique]
-      - name: date_day
+      - name: date_key
         data_tests:
           - not_null
           - relationships:
               arguments:
                 to: ref('dim_date')
-                field: date_day
+                field: date_key
       - name: player_id
         data_tests:
           - not_null
@@ -121,17 +230,28 @@ models:
               arguments:
                 to: ref('dim_games')
                 field: game_id
+      - name: rating
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3, 4, 5]
+                quote: false
+
   - name: fact_achievements
+    description: One row per earned achievement.
+    config:
+      meta: {owner: product, classification: internal, grain: achievement}
     columns:
       - name: achievement_id
         data_tests: [not_null, unique]
-      - name: date_day
+      - name: date_key
         data_tests:
           - not_null
           - relationships:
               arguments:
                 to: ref('dim_date')
-                field: date_day
+                field: date_key
       - name: player_id
         data_tests:
           - not_null
@@ -146,7 +266,11 @@ models:
               arguments:
                 to: ref('dim_games')
                 field: game_id
+
   - name: fact_campaigns
+    description: One row per marketing campaign with budget calculations.
+    config:
+      meta: {owner: marketing, data_steward: marketing-lead, classification: confidential, grain: campaign}
     columns:
       - name: campaign_id
         data_tests: [not_null, unique]
@@ -157,3 +281,23 @@ models:
               arguments:
                 to: ref('dim_games')
                 field: game_id
+      - name: actual_spend
+        description: Spend from budget.xlsx; null means the budget row is missing.
+        data_tests: [not_null]
+
+unit_tests:
+  - name: fact_campaigns_budget_math
+    description: Remaining budget and spend ratio are derived correctly, and a campaign without a budget row is kept.
+    model: fact_campaigns
+    given:
+      - input: ref('stg_marketing_campaigns')
+        rows:
+          - {campaign_id: 1, game_id: 10, campaign: Spring, budget: 1000, start_date: '2025-03-01', end_date: '2025-03-10'}
+          - {campaign_id: 2, game_id: 11, campaign: Summer, budget: 500, start_date: '2025-06-01', end_date: '2025-06-01'}
+      - input: ref('stg_campaign_budget')
+        rows:
+          - {campaign_id: 1, budget: 1000, actual_spend: 250}
+    expect:
+      rows:
+        - {campaign_id: 1, campaign_days: 10, remaining_budget: 750, budget_spend_ratio: 0.25}
+        - {campaign_id: 2, campaign_days: 1, remaining_budget: null, budget_spend_ratio: null}

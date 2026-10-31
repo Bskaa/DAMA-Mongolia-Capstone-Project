@@ -1,306 +1,381 @@
 # Gaming Analytics Data Platform
 
-An end-to-end, local data platform for ingesting, transforming, validating, cataloging, and presenting gaming analytics data. The project is designed as a hands-on learning implementation of a modern analytics workflow rather than as a production deployment.
+An end-to-end, local data platform for ingesting, transforming, validating, governing, cataloguing and presenting gaming analytics data. It is a hands-on capstone implementation of a modern analytics workflow and of the DAMA-DMBOK knowledge areas, not a production deployment.
 
-It combines a synthetic operational source, a public games API, and business-maintained Excel workbooks into a PostgreSQL analytics warehouse. dbt creates a governed analytics layer, Airflow schedules the pipeline, data-quality checks monitor it, and Streamlit presents the resulting metrics.
+Three sources land in a PostgreSQL warehouse that follows the **medallion architecture**: **Bronze** keeps what arrived, **Silver** is typed and cleaned by dbt, **Gold** contains Kimball dimensions, facts and business marts. Airflow orchestrates the daily run, data-quality monitoring watches it, OpenMetadata catalogues it and a read-only Streamlit dashboard presents it.
 
-## Project Overview
+## Contents
 
-The platform has three data inputs:
+- [Architecture](#architecture)
+- [Technology stack](#technology-stack)
+- [Project structure](#project-structure)
+- [Data model](#data-model)
+- [Data governance (DAMA-DMBOK)](#data-governance-dama-dmbok)
+- [Design decisions](#design-decisions)
+- [Prerequisites and configuration](#prerequisites-and-configuration)
+- [Quick start](#quick-start)
+- [Workflows](#workflows)
+- [Validation, testing and CI](#validation-testing-and-ci)
+- [Demo script](#demo-script)
+- [Operations](#operations)
+- [Security and deployment notes](#security-and-deployment-notes)
+- [Troubleshooting](#troubleshooting)
 
-- A synthetic PostgreSQL operational database containing players, games, sessions, purchases, achievements, reviews, and supported platforms.
-- The RAWG public API, which provides a bounded catalog of external game metadata.
-- Excel workbooks containing marketing campaigns, budgets, and game targets.
+## Architecture
 
-All inputs land in the analytics database's `raw` schema. dbt then creates typed `staging` views and star-schema-style tables in `staging_core`. The dashboard queries only the core layer, not operational or raw tables.
+```mermaid
+flowchart LR
+    subgraph Sources
+        SRC[(Operational PostgreSQL<br/>synthetic gaming data)]
+        RAWG[RAWG public API]
+        XLS[Excel workbooks<br/>campaigns, targets, budget]
+    end
 
-```text
-                     ┌────────────────────────────────────┐
-                     │          Source systems            │
-                     │                                    │
-                     │  Synthetic PostgreSQL  RAWG  Excel │
-                     └──────────────┬─────────────┬───────┘
-                                    │             │
-                   Meltano sync ───┘             └── Python loaders
-                                    │
-                                    v
-                  PostgreSQL analytics database
-                  raw -> staging -> staging_core
-                                    │
-                      ┌─────────────┼─────────────┐
-                      v             v             v
-                Data quality   OpenMetadata    Streamlit
-                monitoring       catalog        dashboard
-                                    ^
-                                    │
-                       Airflow orchestrates the pipeline
+    subgraph Warehouse["Analytics PostgreSQL"]
+        BRONZE[(Bronze<br/>raw landing)]
+        SILVER[(Silver<br/>typed dbt views)]
+        SNAP[(Snapshots<br/>SCD Type 2)]
+        GOLD[(Gold<br/>dims, facts, marts)]
+        MON[(monitoring)]
+    end
+
+    SRC -- Meltano incremental --> BRONZE
+    RAWG -- Python loader --> BRONZE
+    XLS -- validated Python loader --> BRONZE
+    BRONZE --> SILVER --> SNAP --> GOLD
+    SILVER --> GOLD
+    GOLD -- analytics_reader role --> DASH[Streamlit dashboard]
+    BRONZE & SILVER & GOLD --> DQ[Quality monitor] --> MON
+    GOLD & SILVER -. lineage .-> OM[OpenMetadata]
+    AF{{Airflow daily DAG}} -. orchestrates .-> BRONZE & GOLD & DQ
 ```
 
-## Learning Objectives
+### Data zones
 
-This project demonstrates how to:
+| Zone | Schema | Contents | Writer | Readable by BI |
+| --- | --- | --- | --- | --- |
+| Operational source | `public` in `postgres-source` | Synthetic transactional entities and events | Data generator | No |
+| Bronze | `bronze` | Meltano streams, RAWG tables, Excel snapshots + Excel history | Meltano, Python loaders | No |
+| Silver | `silver` | Typed dbt views (UTC `timestamptz`), soft-deleted rows removed, FX seed | dbt | No |
+| Snapshots | `snapshots` | SCD Type 2 history of players and games | dbt snapshots | No |
+| Gold | `gold` | Dimensions, facts, bridge table and business marts | dbt | **Yes** (`analytics_reader`) |
+| Observability | `monitoring` | Data-quality runs and relation snapshots | Quality monitor | No |
 
-- Design a relational source schema with primary keys, foreign keys, constraints, and indexes.
-- Generate deterministic synthetic data for repeatable local development.
-- Replicate operational data incrementally with Meltano and Singer.
-- Ingest REST API data safely with validation, bounded pagination, retries, and idempotent upserts.
-- Validate business-managed Excel inputs before loading them into a warehouse.
-- Model RAW data with dbt sources, staging models, dimensions, facts, and data tests.
-- Orchestrate a daily data workflow with Airflow.
-- Monitor freshness, volume changes, and empty relations.
-- Document lineage and database assets with OpenMetadata.
-- Build a read-only Streamlit analytics dashboard.
-- Apply basic local security controls such as loopback-only ports, non-root dashboard execution, and environment-based secrets.
+### Airflow DAG
 
-## Technology Stack
+```mermaid
+flowchart LR
+    A[check_databases] --> B[sync_source_to_bronze]
+    A --> C[ingest_rawg]
+    B --> D[load_business_workbooks]
+    D --> E[dbt_build]
+    C -. skipped is OK .-> E
+    E --> F[monitor_data_quality] --> G[email_data_quality_report]
+```
+
+- `ingest_rawg` runs in parallel with Meltano. If the API key is missing or the API fails, the task is **skipped** (not failed) and `dbt_build` reuses the previously loaded RAWG data.
+- `dbt_build` runs `dbt build`: seeds, snapshots, models, data tests, unit tests and contracts in dependency order. A failing test stops everything downstream of it, so bad data never reaches Gold.
+- `email_data_quality_report` is skipped when SMTP is not configured (or `QUALITY_EMAIL_ENABLED=false`), so an optional feature never turns the run red.
+
+## Technology stack
 
 | Area | Technology | Purpose |
 | --- | --- | --- |
 | Containers | Docker Compose | Local services, networking, profiles, and persistent volumes |
 | Operational store | PostgreSQL 17 | Synthetic gaming source database |
-| Analytics warehouse | PostgreSQL 17 | RAW, staging, core, and monitoring schemas |
+| Analytics warehouse | PostgreSQL 17 | Bronze, Silver, snapshots, Gold and monitoring schemas |
 | Data generation | Python, Faker | Reproducible synthetic gaming data |
-| Replication | Meltano, tap-postgres, target-postgres | Incremental source-to-warehouse replication |
+| Replication | Meltano, tap-postgres, target-postgres | Incremental source-to-Bronze replication |
 | API ingestion | Python standard library, psycopg | Validated and retry-aware RAWG ingestion |
-| Spreadsheet ingestion | openpyxl, psycopg | Excel contract validation and snapshot loading |
-| Transformation | dbt Core, dbt-postgres | Typed staging and core analytics models |
-| Orchestration | Apache Airflow | Scheduled pipeline execution and notification |
-| Data quality | Python, PostgreSQL | Freshness and volume monitoring with persisted results |
-| Metadata | OpenMetadata, MySQL, OpenSearch | Local catalog and dbt lineage ingestion |
-| Visualization | Streamlit, pandas | Read-only analytics dashboard |
-| CI | GitHub Actions workflow | Python, dbt, and Compose validation definition |
+| Spreadsheet ingestion | openpyxl, psycopg | Excel contract validation, snapshot and history loading |
+| Transformation | dbt Core 1.11, dbt-postgres | Silver views, SCD2 snapshots, incremental facts, marts, tests, contracts |
+| Orchestration | Apache Airflow 3 (standalone, LocalExecutor) | Scheduled pipeline execution and notification |
+| Data quality | dbt tests, Python monitor | Rule-based tests plus freshness and volume monitoring |
+| Metadata | OpenMetadata, MySQL, OpenSearch | Catalogue, descriptions, ownership and dbt lineage |
+| Visualization | Streamlit, Altair, pandas | Read-only analytics dashboard |
+| CI | GitHub Actions | Unit tests, `dbt parse`, Compose validation, end-to-end `dbt build` on PostgreSQL |
 
-## Project Structure
+## Project structure
 
 ```text
 .
-├── airflow/
-│   └── dags/
-│       └── gaming_analytics_pipeline.py  # Daily orchestration DAG
-├── dashboard/
-│   ├── app.py                            # Streamlit application
-│   └── requirements.txt
-├── data/
-│   └── business/                         # Marketing, budget, and target workbooks
+├── .github/workflows/ci.yml              # CI: static checks + end-to-end dbt build
+├── airflow/dags/gaming_analytics_pipeline.py
+├── dashboard/app.py                      # Streamlit app (6 tabs, read-only role)
+├── data/business/                        # marketing_campaigns, game_targets, budget workbooks
 ├── dbt/
+│   ├── macros/                           # UTC conversion, date keys, reader-role grants
 │   ├── models/
-│   │   ├── staging/                      # Typed RAW views
-│   │   └── core/                         # Dimensions, facts, and bridge table
-│   ├── tests/                            # Custom dbt SQL tests
+│   │   ├── sources.yml                   # Bronze sources with owners and PII flags
+│   │   ├── silver/                       # stg_* typed views
+│   │   └── gold/                         # dim_*, fact_*, bridge, *_history
+│   │       └── marts/                    # mart_* business marts
+│   ├── seeds/fx_rates_to_usd.csv         # Illustrative FX reference data
+│   ├── snapshots/snapshots.yml           # SCD Type 2 snapshots (players, games)
+│   ├── tests/                            # Singular SQL tests
 │   ├── dbt_project.yml
 │   └── profiles.yml
-├── docker/
-│   ├── airflow/
-│   ├── dashboard/
-│   └── meltano/
+├── docker/                               # Dockerfiles + analytics init script
 ├── ingestion/
 │   ├── api/rawg.py                       # RAWG API client and loader
 │   ├── excel/                            # Workbook generation and loading
-│   └── generate/                         # Synthetic source-data generator
-├── metadata/
-│   └── ingest_postgres.py                # OpenMetadata PostgreSQL workflow
-├── meltano/
-│   └── meltano.yml                       # Singer extractor/loader configuration
-├── monitoring/
-│   └── data_quality.py                   # Freshness and volume checks
-├── sql/                                  # Source and RAW-layer DDL
-├── tests/                                # Python unit tests
-├── .env.example                          # Environment-variable template
-├── docker-compose.yml                    # Service topology and profiles
-└── requirements.txt                      # Local Python dependencies
+│   └── generate/                         # generate_gaming_data CLI (--mode initial|append) + common.py
+├── metadata/ingest_postgres.py           # OpenMetadata PostgreSQL workflow
+├── meltano/meltano.yml
+├── monitoring/data_quality.py            # Freshness and volume checks
+├── sql/                                  # Source DDL, Bronze DDL, migrations, access roles
+├── tests/                                # Python unit tests and CI fixtures
+├── .env.example
+└── docker-compose.yml
 ```
 
-## Architecture
+## Data model
 
-### Data zones
+### Silver (`silver`, views)
 
-| Zone | Schema | Contents | Owner / writer |
-| --- | --- | --- | --- |
-| Operational source | `public` in `postgres-source` | Synthetic transactional entities and events | Data generator |
-| Landing zone | `raw` in `postgres-analytics` | Meltano streams, RAWG API tables, Excel snapshots | Meltano and Python loaders |
-| Standardized layer | `staging` | Typed dbt views; Meltano soft-deleted rows excluded | dbt |
-| Analytics layer | `staging_core` | Dimensions, facts, and game-platform bridge | dbt |
-| Observability | `monitoring` | Data-quality runs and relation snapshots | Quality monitor |
+`stg_*` models cast every column to an explicit PostgreSQL type, exclude Meltano soft-deleted rows (`_sdc_deleted_at`) and convert all event timestamps to UTC `timestamptz` with the `to_utc_timestamptz` macro. `stg_rawg_game_genres` unpacks RAWG genres from the JSON payload and `stg_business_record_history` exposes the Excel audit trail.
 
-### Core model grains
+### Gold core (`gold`, tables)
 
-- `dim_players`, `dim_games`, `dim_platforms`, and `dim_date` store descriptive dimension attributes.
-- `bridge_game_platforms` stores one row per supported game/platform pair.
-- `fact_sessions` stores one row per play session.
-- `fact_purchases` stores one row per purchase in its original currency.
-- `fact_reviews` stores one row per player review.
-- `fact_achievements` stores one row per earned achievement.
-- `fact_campaigns` stores one row per marketing campaign with budget calculations.
-
-RAWG data is deliberately kept separate from synthetic game IDs because the systems do not share a key.
-
-### Docker Compose profiles
-
-| Profile | Service(s) | Use when |
+| Model | Grain | Notes |
 | --- | --- | --- |
-| Default | `postgres-source`, `postgres-analytics` | Running the source and analytics databases |
-| `ingestion` | `meltano` | Installing or running the Meltano pipeline manually |
-| `orchestration` | `airflow` | Scheduling or manually triggering the complete pipeline |
-| `dashboard` | `dashboard` | Viewing analytics through Streamlit |
-| `openmetadata` | OpenMetadata, MySQL, OpenSearch, ingestion | Browsing metadata and lineage |
+| `dim_date` | day | `date_key` (YYYYMMDD) from first activity to one year after today |
+| `dim_players` | player | Current attributes. No username; birth year generalised to `age_band` |
+| `dim_players_history` | player version | SCD Type 2 from `snap_players` (`valid_from`, `valid_to`, `is_current`) |
+| `dim_games` | game | Current catalogue plus targets from `game_targets.xlsx` |
+| `dim_games_history` | game version | SCD Type 2 of price and genre from `snap_games` |
+| `dim_platforms` | platform | |
+| `bridge_game_platforms` | game × platform | Many-to-many bridge |
+| `fact_sessions` | session | **Incremental** (delete+insert on `session_id`, 3-day lookback on `updated_at`) |
+| `fact_purchases` | purchase | **Incremental**; `amount` in original currency plus `amount_usd` |
+| `fact_reviews` | review | |
+| `fact_achievements` | achievement | |
+| `fact_campaigns` | campaign | Budget calculations; campaigns without a budget row are kept and flagged by a test |
 
-## Prerequisites
+All facts carry `date_key` (joins to `dim_date.date_key`) and `date_day`. Day boundaries use the `reporting_timezone` dbt variable (default `UTC`).
+
+### Gold marts (`gold`, tables)
+
+| Mart | Business question |
+| --- | --- |
+| `mart_daily_kpis` | How many players were active, how many were new, and how much did they spend (DAU, ARPDAU, ARPPU in USD)? Contract-enforced. |
+| `mart_game_target_vs_actual` | Which games meet their revenue, player, session and rating targets? |
+| `mart_campaign_performance` | Did revenue of the promoted game rise during a campaign compared with the equally long period before it, relative to spend? |
+| `mart_player_retention` | What share of each monthly cohort keeps playing N months later? |
+| `mart_genre_benchmark` | How do our games' ratings compare with the external RAWG catalogue in the same genre? |
+
+### Business glossary
+
+| Term | Definition |
+| --- | --- |
+| DAU | Distinct players with at least one session on the day |
+| New player | Player whose first ever session falls on the day |
+| ARPDAU | Revenue (USD) of the day ÷ DAU |
+| ARPPU | Revenue (USD) of the day ÷ paying players of the day |
+| Retention rate | Active players of a cohort in month N ÷ cohort size |
+| Revenue attainment | Actual revenue (USD) ÷ target revenue; 1.0 means the target is met |
+| Revenue uplift | Campaign-window revenue − revenue of the equally long window just before |
+
+The same definitions are stored as dbt descriptions and appear in OpenMetadata.
+
+## Data governance (DAMA-DMBOK)
+
+| DAMA knowledge area | How this project implements it |
+| --- | --- |
+| Data architecture | Medallion zones with one writer per zone; Kimball star schema in Gold |
+| Data modelling | Declared grains, surrogate `date_key`, bridge table, SCD Type 2 history, contract on `mart_daily_kpis` |
+| Data integration | Meltano incremental replication, validated API and Excel loaders, idempotent upserts |
+| Data quality | dbt tests mapped to quality dimensions (below) plus freshness and volume monitoring |
+| Metadata management | Descriptions, owners, data stewards, classification and PII flags in dbt YAML; OpenMetadata catalogue and lineage |
+| Data security | Least-privilege roles; dashboard login reads Gold only, in read-only transactions |
+| Reference and master data | `fx_rates_to_usd` seed; conformed `dim_games` / `dim_players` with history |
+| Data warehousing and BI | Gold marts and the Streamlit dashboard |
+| Document and content management | Excel workbooks with exact-schema contracts, file hashes and an append-only history |
+| Data governance | Ownership (`meta.owner`, `meta.data_steward`) per source and model; documented decisions below |
+
+### Data quality dimensions
+
+| Dimension | Checks |
+| --- | --- |
+| Completeness | `not_null` tests; `amount_usd` not null (every currency has a rate); `actual_spend` not null |
+| Uniqueness | `unique` on every primary key; `retention_grain_unique`; bridge pair uniqueness |
+| Validity | `accepted_values` (payment method, rating, age band, file name); target ranges; retention rate between 0 and 1 |
+| Consistency | `campaign_budget_matches`; `daily_kpis_reconcile_with_facts` (mart equals facts) |
+| Integrity | `relationships` from every fact to its dimensions and to `dim_date`; session platform must be supported by the game |
+| Timeliness | Freshness monitor on `_sdc_extracted_at`, `fetched_at` and `loaded_at` with warn/error thresholds |
+| Accuracy (plausibility) | Session timestamps and duration rules; volume-change monitor |
+
+### Personal data
+
+| Column | Classification | Where it is available |
+| --- | --- | --- |
+| `username` | Direct identifier (PII) | Bronze and Silver only |
+| `birth_year` | Quasi-identifier (PII) | Bronze and Silver; Gold exposes `age_band` only |
+| `country` | Quasi-identifier | All layers |
+
+Gold is the only schema granted to the `analytics_reader` role, so the dashboard cannot read PII even by mistake. This follows the data-minimisation principle of Mongolia's Law on the Protection of Personal Information (2021) and the GDPR.
+
+### Data lifecycle
+
+| Data | Retention policy (proposed) |
+| --- | --- |
+| Bronze Meltano tables | Kept while the source exists; rebuilt from the source if lost |
+| `bronze.rawg_*.raw_payload` | Refreshed on each run; prune payloads older than 12 months if storage grows |
+| `bronze.business_record_history` | Kept for 5 years for audit of targets and budgets |
+| `monitoring.*` | Keep 13 months of runs for trend analysis |
+| Gold | Rebuilt by dbt; snapshots keep the full attribute history |
+
+## Design decisions
+
+| Decision | Reason | Trade-off |
+| --- | --- | --- |
+| Meltano incremental replication instead of CDC (Debezium) | Simple, no Kafka; enough for a daily batch | Hard deletes and updates that do not advance `updated_at` are not seen |
+| Event streams incremental, reference streams full-table | Events grow daily; dimensions are small | Full reloads of small tables cost little |
+| No foreign keys in Bronze | Bronze must accept whatever arrives; a Bronze FK on a Meltano table can block reloads | Integrity is enforced by the loaders and dbt tests instead |
+| Excel current snapshot + append-only history | Dashboards need "current"; auditors need "what was the target in March" | Extra storage, small for workbooks |
+| RAWG compared by genre only | RAWG and the synthetic catalogue share no game key; genre is the conformed attribute | Benchmark is approximate; name matching would be error-prone |
+| Original currency kept; USD via a seed | Never add amounts in different currencies | Seed rates are illustrative and static |
+| Incremental facts with a 3-day lookback | Absorbs late-arriving updates while keeping runs fast | Rows deleted at source stay until `dbt build --full-refresh` |
+| UTC storage, reporting time zone as a variable | Stable day boundaries regardless of server/session time zone | Change `reporting_timezone` to `Asia/Ulaanbaatar` for local-day reporting |
+| Gold-only reader role | Least privilege and PII protection | New schemas must be granted deliberately |
+| Targets compared with all warehouse activity | The workbook has no target period column | Add `target_year` to the workbook to compare per period |
+
+## Prerequisites and configuration
 
 - Docker Desktop with Docker Compose v2.
-- Python 3.10 or newer; Python 3.11 is used by the project containers and CI workflow.
+- Python 3.10 or newer (the containers and CI use Python 3.11).
 - PowerShell on Windows.
-- A RAWG API key if the RAWG workflow or Airflow pipeline will be run.
-- SMTP settings only if email notifications are required from Airflow.
-
-## Configuration
-
-Create a private local configuration file from the template:
+- A RAWG API key for the RAWG workflow (optional; the DAG skips RAWG without it).
+- SMTP settings only if email notifications are required.
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-Set a strong local `POSTGRES_PASSWORD` and make the password in `DATABASE_URL` match it. Do not commit `.env` or expose its API keys, JWTs, or SMTP credentials.
+Set a strong `POSTGRES_PASSWORD` and make `DATABASE_URL` match it. Do not commit `.env`.
 
 | Variables | Required for | Notes |
 | --- | --- | --- |
-| `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `DATABASE_URL` | Source generation and database services | `DATABASE_URL` targets the source database from the host |
-| `ANALYTICS_DB`, `ANALYTICS_PORT` | Analytics loaders and dbt | The default host port is `5433` |
+| `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `DATABASE_URL` | Databases, generator, loaders, dbt | `DATABASE_URL` targets the source database from the host |
+| `ANALYTICS_DB`, `ANALYTICS_PORT` | Analytics loaders and dbt | Default host port `5433` |
+| `DASHBOARD_DB_USER`, `DASHBOARD_DB_PASSWORD` | Dashboard | Read-only Gold login created by `sql/006_access_roles.sql` |
 | `RAWG_API_KEY`, `RAWG_MAX_PAGES` | RAWG ingestion | Page count limits API usage |
-| `AIRFLOW__SMTP__*`, `QUALITY_ALERT_EMAIL_TO` | Airflow email report | Optional until notification is enabled |
-| `OPENMETADATA_MYSQL_ROOT_PASSWORD`, `OPENMETADATA_JWT_TOKEN` | OpenMetadata | Needed only for the metadata profile |
+| `AIRFLOW__SMTP__*`, `QUALITY_ALERT_EMAIL_TO`, `QUALITY_EMAIL_ENABLED` | Airflow email report | Report is skipped when not configured |
+| `OPENMETADATA_MYSQL_ROOT_PASSWORD`, `OPENMETADATA_JWT_TOKEN` | OpenMetadata | Only for the `openmetadata` profile |
 | `DATA_QUALITY_*` | Quality monitor | Optional threshold overrides |
-
-Validate the resolved configuration before starting services:
 
 ```powershell
 docker compose config --quiet
 ```
 
-## Quick Start
-
-The following sequence creates a usable local environment and builds the analytics models.
+## Quick start
 
 ```powershell
 # 1. Start the source and analytics databases.
 docker compose up -d --wait postgres-source postgres-analytics
 
-# 2. Create the local Python environment and install dependencies.
+# 2. Python environment.
 py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 
-# 3. Seed the source operational database.
+# 3. Seed the source database.
 .\.venv\Scripts\python.exe -m ingestion.generate.generate_gaming_data
 
-# 4. Install and run incremental source replication.
+# 4. Replicate the source into Bronze.
 docker compose build meltano
 docker compose run --rm meltano install
 docker compose run --rm meltano run tap-postgres target-postgres
 
-# 5. Load the business workbooks. This requires raw.games from the Meltano sync.
+# 5. Load the business workbooks (needs bronze.games from step 4).
 .\.venv\Scripts\python.exe -m ingestion.excel.load_excel
 
-# 6. Load dbt connection variables, then build and test the analytics layer.
+# 6. Create the read-only dashboard login (once per analytics database).
 $localEnv = Get-Content .env -Raw | ConvertFrom-StringData
+docker compose exec -T postgres-analytics psql -U $localEnv.POSTGRES_USER -d $localEnv.ANALYTICS_DB `
+    -v dashboard_password=$($localEnv.DASHBOARD_DB_PASSWORD) -f /sql/006_access_roles.sql
+
+# 7. Build and test everything with dbt.
 $env:POSTGRES_USER = $localEnv.POSTGRES_USER
 $env:POSTGRES_PASSWORD = $localEnv.POSTGRES_PASSWORD
 $env:ANALYTICS_DB = $localEnv.ANALYTICS_DB
 $env:ANALYTICS_PORT = $localEnv.ANALYTICS_PORT
 $env:DBT_HOST = "localhost"
-.\.venv\Scripts\dbt.exe run --project-dir dbt --profiles-dir dbt
-.\.venv\Scripts\dbt.exe test --project-dir dbt --profiles-dir dbt
+.\.venv\Scripts\dbt.exe build --project-dir dbt --profiles-dir dbt
 ```
 
-The RAWG workflow is intentionally not in the quick-start sequence because it needs a valid API key. Run it after the analytics database is available if external catalog data is needed.
+On a brand-new analytics volume step 6 runs automatically (`docker/postgres-analytics/10-access-roles.sh`) when `DASHBOARD_DB_PASSWORD` is set.
+
+> **Upgrading an existing database** (created before the Bronze/Silver/Gold rename or before this version):
+> 1. Run `sql/005_rename_analytics_layers.sql` once if the old `raw`/`staging`/`staging_core` schemas exist.
+> 2. Run the Excel loader once; it applies `sql/004_excel_business_schema.sql`, which drops the old Bronze foreign keys and creates the history tables.
+> 3. Run `dbt build --full-refresh` once, because `fact_sessions` and `fact_purchases` changed from tables to incremental models.
 
 ## Workflows
 
-### 1. Synthetic source-data workflow
+### 1. Synthetic source data
 
-**Purpose:** Create deterministic, referentially valid operational gaming data in `postgres-source.public`.
+One CLI, `ingestion.generate.generate_gaming_data`, creates deterministic, referentially valid operational data in `postgres-source.public`. Both modes build rows with the same builders in `ingestion/generate/common.py`, so the business rules (activity never before account creation or game release, sessions only on supported platforms, one review per player and game) are identical.
 
-The generator creates players, platforms, games, game-platform pairs, sessions, purchases, achievements, and reviews. It uses a fixed seed by default and emits UTC timestamps. Database constraints enforce primary-key, foreign-key, uniqueness, and domain rules.
+| Mode | What it does | Defaults |
+| --- | --- | --- |
+| `--mode initial` (default) | Builds a complete dataset; refuses to write into populated tables unless `--reset` | seed 42, as-of 2025-12-31, 10 000 players, 1 000 games, 100 000 sessions |
+| `--mode append` | Adds new players, games and activity on top of existing data; never deletes or updates; IDs continue from `MAX(id) + 1` | seed 123, as-of today, 1 000 players, 100 games, 10 000 sessions |
 
 ```powershell
-# Default data volume
+# Initial dataset
 .\.venv\Scripts\python.exe -m ingestion.generate.generate_gaming_data
-
-# Small data volume for fast local testing
+# Small dataset for fast local tests
 .\.venv\Scripts\python.exe -m ingestion.generate.generate_gaming_data --players 100 --games 20 --sessions 500 --purchases 100 --reviews 100
-
 # Destructive: replace all generated source rows
 .\.venv\Scripts\python.exe -m ingestion.generate.generate_gaming_data --reset
+# Append a daily-sized batch (any count can be 0)
+.\.venv\Scripts\python.exe -m ingestion.generate.generate_gaming_data --mode append --sessions 2000 --purchases 500
+# All options and per-mode defaults
+.\.venv\Scripts\python.exe -m ingestion.generate.generate_gaming_data --help
 ```
 
-Use `--reset` only when replacing the source dataset is intentional. Without it, the generator refuses to insert into populated source tables.
+### 2. Incremental source-to-Bronze replication
 
-### 2. Incremental source-to-RAW replication workflow
+Meltano reads the source `public` schema with `tap-postgres` and `target-postgres` upserts into `bronze` by primary key, keeping Singer `_sdc_*` metadata.
 
-**Purpose:** Replicate the eight operational source tables into `postgres-analytics.raw`.
-
-Meltano uses `tap-postgres` to read the source `public` schema. Each stream uses `updated_at` as its incremental bookmark, and `target-postgres` applies primary-key upserts. The RAW tables also retain Singer `_sdc_*` ingestion metadata.
+- `sessions`, `purchases`, `reviews` and `achievements` replicate **incrementally** on `updated_at`.
+- `players`, `games`, `platforms` and `game_platforms` are small and reload in full.
 
 ```powershell
-# First use only: download the Meltano plugins.
 docker compose run --rm meltano install
-
-# Run the incremental replication pipeline.
 docker compose run --rm meltano run tap-postgres target-postgres
 ```
 
 This is incremental replication, not change-data capture: hard deletes and updates that do not advance `updated_at` are not detected.
 
-### 3. RAWG API ingestion workflow
+### 3. RAWG API ingestion
 
-**Purpose:** Ingest a bounded external catalog of games, platforms, genres, publishers, and developers into `raw.rawg_*` tables.
-
-The loader validates API responses and records, checks pagination URLs, retries transient failures and rate limits, stores the original payload as JSONB, and upserts records by RAWG ID.
+Ingests a bounded external catalogue of games, platforms, genres, publishers and developers into `bronze.rawg_*`. The loader validates responses, checks pagination URLs, retries transient failures and rate limits, stores the original payload as JSONB and upserts by RAWG ID. dbt uses it for `mart_genre_benchmark`.
 
 ```powershell
-# See all options.
 .\.venv\Scripts\python.exe -m ingestion.api.rawg --help
-
-# Fetch a small games sample.
 .\.venv\Scripts\python.exe -m ingestion.api.rawg --resources games --page-size 40 --max-pages 2
-
-# Fetch several catalog resources.
 .\.venv\Scripts\python.exe -m ingestion.api.rawg --resources platforms genres publishers developers --max-pages 3
 ```
 
-Set `RAWG_API_KEY` in `.env` before running this workflow. Preserve required RAWG attribution whenever API-derived data is displayed.
+Set `RAWG_API_KEY` in `.env` first. Show the RAWG attribution wherever RAWG-derived data is displayed (the dashboard does this on the benchmark tab).
 
-### 4. Excel business-data workflow
+### 4. Excel business data
 
-**Purpose:** Load controlled business inputs into `raw` after validating their structure and relationships.
+Workbooks in `data/business`: `marketing_campaigns.xlsx`, `game_targets.xlsx`, `budget.xlsx`.
 
-Required workbooks are stored in `data/business`:
+The loader requires exact sheet names and headers, normalises types, rejects invalid dates and values, checks campaign/budget agreement, confirms referenced games exist in `bronze.games`, deduplicates identical rows and skips unchanged files by SHA-256. Each changed load:
 
-- `marketing_campaigns.xlsx`
-- `game_targets.xlsx`
-- `budget.xlsx`
-
-The loader requires exact sheet names and headers, normalizes data types, rejects invalid dates and values, checks campaign/budget agreement, confirms referenced games exist in `raw.games`, deduplicates identical rows, and records file hashes in `raw.business_file_loads`.
+- replaces the current snapshot tables (`bronze.raw_*`), and
+- appends to `bronze.business_load_log` (one row per file) and `bronze.business_record_history` (every record as JSON), so earlier targets and budgets remain auditable.
 
 ```powershell
-# Optional: create deterministic sample workbooks.
-.\.venv\Scripts\python.exe -m ingestion.excel.generate_business_data
-
-# Validate and load changed workbooks.
+.\.venv\Scripts\python.exe -m ingestion.excel.generate_business_data   # optional sample workbooks
 .\.venv\Scripts\python.exe -m ingestion.excel.load_excel
-
-# Reload even when workbook hashes have not changed.
-.\.venv\Scripts\python.exe -m ingestion.excel.load_excel --force
+.\.venv\Scripts\python.exe -m ingestion.excel.load_excel --force       # reload unchanged files
 ```
 
-Run the Meltano replication workflow first, because workbook game IDs are validated against `raw.games`.
-
-### 5. dbt transformation and testing workflow
-
-**Purpose:** Convert raw ingestion tables into consistent staging views and analytics-ready core tables.
-
-`staging` models are views that cast fields to explicit PostgreSQL types and exclude Meltano soft-deleted rows. `staging_core` models are tables that implement dimensions, facts, and the game-platform bridge. dbt never reloads the RAW layer.
-
-Load the database settings into the PowerShell process before running dbt:
+### 5. dbt build
 
 ```powershell
 $localEnv = Get-Content .env -Raw | ConvertFrom-StringData
@@ -311,119 +386,107 @@ $env:ANALYTICS_PORT = $localEnv.ANALYTICS_PORT
 $env:DBT_HOST = "localhost"
 
 .\.venv\Scripts\dbt.exe debug --project-dir dbt --profiles-dir dbt
-.\.venv\Scripts\dbt.exe run --project-dir dbt --profiles-dir dbt
-.\.venv\Scripts\dbt.exe test --project-dir dbt --profiles-dir dbt
-```
-
-Useful dbt inspection commands:
-
-```powershell
-.\.venv\Scripts\dbt.exe ls --project-dir dbt --profiles-dir dbt
-.\.venv\Scripts\dbt.exe compile --project-dir dbt --profiles-dir dbt
+.\.venv\Scripts\dbt.exe build --project-dir dbt --profiles-dir dbt                 # everything
+.\.venv\Scripts\dbt.exe build --project-dir dbt --profiles-dir dbt --full-refresh  # rebuild incremental facts
+.\.venv\Scripts\dbt.exe build --project-dir dbt --profiles-dir dbt --select +mart_daily_kpis
 .\.venv\Scripts\dbt.exe docs generate --project-dir dbt --profiles-dir dbt
 ```
 
-### 6. Data-quality monitoring workflow
+`dbt build` runs, in dependency order: the FX seed, Silver views, snapshots, Gold dimensions and facts, marts, all data tests, the unit test on `fact_campaigns` and the contract on `mart_daily_kpis`. Run hooks create the `analytics_reader` group role if needed and grant it Gold.
 
-**Purpose:** Detect empty tables, stale ingestion, and significant row-count changes across RAW, staging, and core relations.
+### 6. Data-quality monitoring
 
-The monitor writes every result to the analytics database's `monitoring` schema. The first successful check establishes the baseline for volume comparisons. Freshness comes from Meltano `_sdc_extracted_at`, RAWG `fetched_at`, and Excel `loaded_at` timestamps.
+Detects empty relations, stale ingestion and large row-count changes across Bronze, Silver, snapshots and Gold. Results are stored in the `monitoring` schema; the first run sets the volume baseline. RAWG relations are *optional*: when RAWG has not been loaded (no API key), their empty or stale state is reported as a warning, not a failure, so the DAG stays green.
 
 ```powershell
 .\.venv\Scripts\python.exe -m monitoring.data_quality
 ```
 
-Configure thresholds with `DATA_QUALITY_VOLUME_CHANGE_WARN_PERCENT`, `DATA_QUALITY_FRESHNESS_WARN_HOURS`, `DATA_QUALITY_FRESHNESS_ERROR_HOURS`, and the corresponding Excel freshness variables.
+Thresholds: `DATA_QUALITY_VOLUME_CHANGE_WARN_PERCENT`, `DATA_QUALITY_FRESHNESS_WARN_HOURS`, `DATA_QUALITY_FRESHNESS_ERROR_HOURS` and the Excel freshness variables.
 
-### 7. Airflow orchestration workflow
+### 7. Airflow orchestration
 
-**Purpose:** Run the full ingestion, transformation, test, monitoring, and notification workflow daily.
-
-The DAG runs at `02:00` in the `Asia/Ulaanbaatar` timezone, has `catchup=False`, allows one active run, and retries failed tasks once. It is intended for a single-user local learning environment.
+The DAG runs daily at `02:00` `Asia/Ulaanbaatar`, with `catchup=False`, one active run and one retry per task. Airflow runs in `standalone` mode with the LocalExecutor and its default SQLite metadata database, which is suitable for a single-user learning environment only.
 
 ```powershell
-# Build and start Airflow.
 docker compose --profile orchestration up -d --build --wait airflow
-
-# Inspect the DAG and import status.
-docker compose exec airflow airflow dags list
 docker compose exec airflow airflow dags list-import-errors
 docker compose exec airflow airflow tasks list gaming_analytics_pipeline
-
-# Trigger a complete run now.
 docker compose exec airflow airflow dags trigger gaming_analytics_pipeline
-docker compose logs --follow airflow
-```
-
-The Airflow UI is available at `http://localhost:8080`. On first startup, the local admin password is stored inside the Airflow volume:
-
-```powershell
 docker compose exec airflow cat /opt/airflow/standalone_admin_password.txt
 ```
 
-Configure `RAWG_API_KEY` and the SMTP variables before triggering the complete DAG. Use Airflow for scheduled operation instead of manually running the individual ingestion and dbt steps.
+The UI is at `http://localhost:8080`; the last command prints the local admin password created on first start.
 
-### 8. Dashboard workflow
-
-**Purpose:** Present analytics from the dbt core layer without modifying the warehouse.
-
-The Streamlit application reads `staging_core` through a read-only PostgreSQL transaction. It provides date, game, and purchase-currency filters; purchase values from different currencies are intentionally not aggregated.
+### 8. Dashboard
 
 ```powershell
 docker compose --profile dashboard up -d --build --wait dashboard
-docker compose ps dashboard postgres-analytics
 ```
 
-Open `http://localhost:8501`. Build dbt models before opening the dashboard; otherwise, no core data is available to display.
+Open `http://localhost:8501`. The app connects as `dashboard_user` (Gold only, read-only transactions, 30 s statement timeout) and has six tabs: **Overview**, **Daily KPIs**, **Targets vs actual**, **Campaigns**, **Retention** and **Genre benchmark (RAWG)**. Purchase values in different currencies are never added together; USD figures use the FX reference seed.
 
-### 9. Metadata and lineage workflow (optional)
-
-**Purpose:** Catalog PostgreSQL schemas and dbt lineage in a local OpenMetadata instance.
+### 9. Metadata and lineage (optional)
 
 ```powershell
-# Start the local metadata stack.
 docker compose --profile openmetadata up -d --wait openmetadata-server
 Invoke-RestMethod http://localhost:8585/healthcheck
-
-# Ingest PostgreSQL metadata after setting OPENMETADATA_JWT_TOKEN.
 docker compose --profile openmetadata run --rm openmetadata-ingestion
-
-# Generate dbt artifacts, then ingest dbt metadata and lineage.
 .\.venv\Scripts\dbt.exe docs generate --project-dir dbt --profiles-dir dbt
 docker compose --profile openmetadata run --rm --entrypoint metadata openmetadata-ingestion ingest-dbt -c /project/dbt
 ```
 
-OpenMetadata is available at `http://localhost:8585`. It is an optional, memory-intensive local service; stop it when not in use.
+dbt descriptions, owners (`meta.owner`), stewards, classification and PII flags appear on the assets in OpenMetadata at `http://localhost:8585`. Stop the stack when not in use; it is memory-intensive.
 
-## Validation and Testing
+## Validation, testing and CI
 
-Run the local validation suite from the project root:
+Local checks:
 
 ```powershell
-.\.venv\Scripts\python.exe -m compileall -q ingestion monitoring dashboard tests
+.\.venv\Scripts\python.exe -m compileall -q ingestion monitoring dashboard tests airflow
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 docker compose config --quiet
 ```
 
-To validate dbt parsing without a live database, export the placeholder environment variables used by CI and run:
+`dbt parse` without a database:
 
 ```powershell
-$env:DBT_HOST = "localhost"
-$env:ANALYTICS_PORT = "5433"
-$env:POSTGRES_USER = "gaming"
-$env:POSTGRES_PASSWORD = "ci-only-placeholder"
+$env:DBT_HOST = "localhost"; $env:ANALYTICS_PORT = "5433"
+$env:POSTGRES_USER = "gaming"; $env:POSTGRES_PASSWORD = "ci-only-placeholder"
 $env:ANALYTICS_DB = "gaming_analytics"
 $env:OPENMETADATA_HOST_PORT = "http://localhost:8585/api"
 $env:OPENMETADATA_JWT_TOKEN = "ci-only-placeholder"
 $env:OPENMETADATA_SERVICE_NAME = "gaming-analytics-ci"
-.\.venv\Scriptsdbt.exe parse --no-partial-parse --project-dir dbt --profiles-dir dbt
+.\.venv\Scripts\dbt.exe parse --no-partial-parse --project-dir dbt --profiles-dir dbt
 ```
 
-The GitHub Actions workflow defines the same core checks for a repository-hosted CI environment.
+GitHub Actions (`.github/workflows/ci.yml`) runs two jobs on every push and pull request:
+
+1. **static-checks**: byte-compilation, Python unit tests, `dbt parse`, `docker compose config` for every profile.
+2. **dbt-integration**: starts PostgreSQL, generates synthetic data, emulates the Meltano sync (`tests/fixtures/ci_bronze_from_source.sql`), loads generated workbooks, creates the access roles, runs `dbt build` twice (second run exercises the incremental and snapshot paths) and verifies that `dashboard_user` can read Gold but not Silver.
+
+## Demo script
+
+A 5-minute demonstration of incremental processing and history:
+
+```powershell
+# 1. Baseline
+docker compose exec airflow airflow dags trigger gaming_analytics_pipeline
+
+# 2. New activity and an attribute change in the source
+.\.venv\Scripts\python.exe -m ingestion.generate.generate_gaming_data --mode append --players 50 --sessions 2000 --purchases 300
+docker compose exec -T postgres-source psql -U gaming -d gaming_source -c "UPDATE games SET price = 4.99, updated_at = now() WHERE game_id = 1"
+
+# 3. Run again: Meltano reads only new rows, dbt merges them into the incremental facts,
+#    and the snapshot records the new game price.
+docker compose exec airflow airflow dags trigger gaming_analytics_pipeline
+docker compose exec -T postgres-analytics psql -U gaming -d gaming_analytics -c "SELECT game_id, price, valid_from, valid_to, is_current FROM gold.dim_games_history WHERE game_id = 1 ORDER BY valid_from"
+
+# 4. Show the dashboard (Daily KPIs, Targets, Campaigns, Retention, Genre benchmark)
+#    and the lineage of mart_daily_kpis in OpenMetadata.
+```
 
 ## Operations
-
-### Service status and logs
 
 ```powershell
 docker compose ps
@@ -432,7 +495,7 @@ docker compose --profile orchestration logs --tail 100 airflow
 docker compose --profile dashboard logs --tail 100 dashboard
 ```
 
-### Stop services while preserving data
+Stop services while preserving data:
 
 ```powershell
 docker compose --profile orchestration stop airflow
@@ -441,30 +504,33 @@ docker compose --profile openmetadata stop openmetadata-server openmetadata-mysq
 docker compose stop postgres-source postgres-analytics
 ```
 
-Named Docker volumes preserve database, Airflow, Meltano, and OpenMetadata state. Do not run `docker compose down --volumes` unless deleting all local project data is intentional.
+Named Docker volumes preserve database, Airflow, Meltano and OpenMetadata state. Do not run `docker compose down --volumes` unless deleting all local data is intentional.
 
-## Security and Deployment Notes
+## Security and deployment notes
 
-- Keep secrets only in the local, ignored `.env` file.
-- PostgreSQL, Airflow, Streamlit, and OpenMetadata host ports bind to `127.0.0.1` by default.
-- The dashboard runs as a non-root user, drops Linux capabilities, prevents privilege escalation, and opens read-only database transactions.
-- This is not a production deployment. Airflow uses SQLite metadata and `SequentialExecutor`; no HA setup, remote secret manager, TLS termination, or tested disaster-recovery process is included.
-- The OpenMetadata/OpenSearch configuration is for isolated local learning only.
-- The source schema initialization scripts run only for a new PostgreSQL data volume. Apply changes to an existing database deliberately through migrations or `psql`.
+- Secrets live only in the ignored `.env` file.
+- PostgreSQL, Airflow, Streamlit and OpenMetadata ports bind to `127.0.0.1`.
+- The dashboard uses a dedicated `dashboard_user` login that can only `SELECT` from Gold, with `default_transaction_read_only` and a statement timeout; it runs as a non-root user without Linux capabilities.
+- Bronze, Silver, snapshots and monitoring are not granted to any BI role; PII stays there.
+- This is not a production deployment: Airflow uses SQLite metadata, there is no HA, no remote secret manager, no TLS termination and no tested disaster-recovery process. The OpenMetadata/OpenSearch configuration is for isolated local learning only.
+- Database init scripts run only for a new volume. Apply changes to existing databases deliberately (see *Upgrading an existing database*).
 
 ## Troubleshooting
 
 | Symptom | Recommended check |
 | --- | --- |
-| Docker service does not start | Run `docker compose ps` and `docker compose logs <service>`; confirm Docker Desktop is running. |
-| Python loader cannot connect | Confirm both PostgreSQL services are healthy and that `.env` connection settings match the configured host ports. |
-| Meltano reports plugin or state issues | Rebuild the image, run `docker compose run --rm meltano install`, then rerun the pipeline. |
-| RAWG ingestion fails | Confirm `RAWG_API_KEY`, reduce `RAWG_MAX_PAGES`, and inspect the loader output for rate-limit or validation errors. |
-| Excel loader fails | Verify workbook names, sheet names, exact headers, required fields, and referenced game IDs. |
-| dbt connection fails | Reload `.env` values into PowerShell and run `dbt debug`. |
-| Dashboard has no data | Run the ingestion workflows and `dbt run` successfully before starting the dashboard. |
-| Airflow DAG is missing | Run `docker compose exec airflow airflow dags list-import-errors`, then rebuild the Airflow image after dependency or DAG changes. |
+| Docker service does not start | `docker compose ps` and `docker compose logs <service>`; confirm Docker Desktop is running |
+| Python loader cannot connect | Both PostgreSQL services healthy; `.env` settings match the host ports |
+| Meltano plugin or state issues | Rebuild the image, `docker compose run --rm meltano install`, rerun |
+| RAWG task is *skipped* in Airflow | Expected without `RAWG_API_KEY` or when the API fails; check the task log |
+| Excel loader rejects game IDs | Every `game_id` in the workbooks must exist in `bronze.games` |
+| `dbt build` fails on `fact_sessions` after upgrading | Run `dbt build --full-refresh` once |
+| `relationships` test fails on `currency` | Add the new currency to `dbt/seeds/fx_rates_to_usd.csv` |
+| Dashboard: "Set DASHBOARD_DB_PASSWORD" | Add it to `.env` and run `sql/006_access_roles.sql` (Quick start step 6) |
+| Dashboard: permission denied for schema gold | Run `dbt build` (it grants Gold to `analytics_reader`) |
+| Email report task is *skipped* | Expected until SMTP variables and `QUALITY_ALERT_EMAIL_TO` are set |
+| Airflow DAG is missing | `docker compose exec airflow airflow dags list-import-errors`; rebuild after dependency changes |
 
-## License and Intended Use
+## License and intended use
 
-This is an educational capstone project. The source gaming records are synthetic, and the RAWG collection is bounded for demonstration purposes. Follow RAWG's terms and attribution requirements when using API-derived data.
+Educational capstone project. Source gaming records are synthetic and the RAWG collection is bounded for demonstration. Follow RAWG's terms and attribution requirements when using API-derived data.

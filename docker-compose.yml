@@ -12,8 +12,6 @@ services:
       - postgres_source_data:/var/lib/postgresql/data
       - ./sql/source_schema.sql:/docker-entrypoint-initdb.d/001_source_schema.sql:ro
       - ./sql/002_meltano_incremental_migration.sql:/docker-entrypoint-initdb.d/002_meltano_incremental_migration.sql:ro
-      - ./sql/phase2_incremental_demo.sql:/sql/phase2_incremental_demo.sql:ro
-      - ./sql/phase2_incremental_demo_update.sql:/sql/phase2_incremental_demo_update.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 5s
@@ -28,10 +26,14 @@ services:
       POSTGRES_DB: ${ANALYTICS_DB:-gaming_analytics}
       POSTGRES_USER: ${POSTGRES_USER:-gaming}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      # Used once, on a new volume, to create the least-privilege dashboard login.
+      DASHBOARD_DB_PASSWORD: ${DASHBOARD_DB_PASSWORD:-}
     ports:
       - "127.0.0.1:${ANALYTICS_PORT:-5433}:5432"
     volumes:
       - postgres_analytics_data:/var/lib/postgresql/data
+      - ./sql:/sql:ro
+      - ./docker/postgres-analytics/10-access-roles.sh:/docker-entrypoint-initdb.d/10-access-roles.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 5s
@@ -138,8 +140,9 @@ services:
       ANALYTICS_DB: ${ANALYTICS_DB:-gaming_analytics}
       DASHBOARD_DB_HOST: postgres-analytics
       DASHBOARD_DB_PORT: "5432"
-      POSTGRES_USER: ${POSTGRES_USER:-gaming}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      # Least-privilege, read-only login (member of analytics_reader; Gold only).
+      DASHBOARD_DB_USER: ${DASHBOARD_DB_USER:-dashboard_user}
+      DASHBOARD_DB_PASSWORD: ${DASHBOARD_DB_PASSWORD:-}
     security_opt:
       - no-new-privileges:true
     cap_drop:

@@ -2,11 +2,24 @@ version: 2
 
 models:
   - name: stg_players
+    description: Typed players from Bronze. Holds personal data; not granted to BI roles.
+    config:
+      meta: {owner: platform-engineering, data_steward: player-data-steward, classification: confidential, contains_pii: true}
     columns:
       - name: player_id
         data_tests: [not_null, unique]
       - name: username
+        description: Direct identifier (PII). Never exposed in Gold.
+        config:
+          meta: {pii: true, pii_type: direct_identifier}
         data_tests: [not_null, unique]
+      - name: birth_year
+        description: Personal data (PII). Generalised to age_band in Gold.
+        config:
+          meta: {pii: true, pii_type: quasi_identifier}
+      - name: country
+        config:
+          meta: {pii: true, pii_type: quasi_identifier}
   - name: stg_platforms
     columns:
       - name: platform_id
@@ -80,6 +93,13 @@ models:
           - accepted_values:
               arguments:
                 values: ['card', 'wallet', 'gift_card', 'mobile']
+      - name: currency
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('fx_rates_to_usd')
+                field: currency
   - name: stg_achievements
     columns:
       - name: achievement_id
@@ -182,3 +202,32 @@ models:
               arguments:
                 to: ref('stg_marketing_campaigns')
                 field: campaign_id
+  - name: stg_rawg_game_genres
+    description: RAWG game-to-genre pairs unpacked from raw_payload; used for the genre benchmark.
+    config:
+      meta: {owner: analytics-engineering, classification: public, external_source: rawg_api}
+    columns:
+      - name: rawg_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_rawg_games')
+                field: rawg_id
+      - name: genre_key
+        data_tests: [not_null]
+  - name: stg_business_record_history
+    description: Append-only audit trail of every Excel business record, one row per load and record.
+    config:
+      meta: {owner: analytics-engineering, classification: internal}
+    columns:
+      - name: load_id
+        data_tests: [not_null]
+      - name: file_name
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['marketing_campaigns.xlsx', 'game_targets.xlsx', 'budget.xlsx']
+      - name: record
+        data_tests: [not_null]

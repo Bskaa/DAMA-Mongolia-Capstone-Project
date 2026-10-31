@@ -57,7 +57,7 @@ def main() -> None:
                         "includeTables": True,
                         "includeViews": True,
                         "schemaFilterPattern": {
-                            "includes": ["^(bronze|silver|gold)$"]
+                            "includes": ["^(bronze|silver|snapshots|gold)$"]
                         },
                     }
                 },

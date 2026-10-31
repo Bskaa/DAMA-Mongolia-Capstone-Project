@@ -1,5 +1,5 @@
 name: gaming_analytics
-version: "1.0.0"
+version: "1.1.0"
 config-version: 2
 
 profile: gaming_analytics
@@ -9,12 +9,24 @@ vars:
   openmetadata_jwt_token: "${OPENMETADATA_JWT_TOKEN}"
   openmetadata_service_name: "${OPENMETADATA_SERVICE_NAME}"
   openmetadata_dbt_update_owners: false
+  # Calendar used for date_day / date_key in Gold (all stored timestamps are UTC).
+  reporting_timezone: UTC
+  # Incremental facts re-read this many days of updated rows to absorb late updates.
+  incremental_lookback_days: 3
 
 model-paths: ["models"]
 test-paths: ["tests"]
+seed-paths: ["seeds"]
+snapshot-paths: ["snapshots"]
+macro-paths: ["macros"]
 clean-targets:
   - "target"
   - "dbt_packages"
+
+on-run-start:
+  - "{{ ensure_reader_role() }}"
+on-run-end:
+  - "{{ grant_reader_schema_usage() }}"
 
 models:
   gaming_analytics:
@@ -24,3 +36,16 @@ models:
     gold:
       +schema: gold
       +materialized: table
+      +grants:
+        select: ["analytics_reader"]
+      marts:
+        +meta:
+          layer: gold_mart
+
+seeds:
+  gaming_analytics:
+    +schema: silver
+
+snapshots:
+  gaming_analytics:
+    +schema: snapshots

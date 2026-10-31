@@ -1,3 +1,5 @@
+{%- set src = source('bronze', 'games') -%}
+
 select
     game_id::bigint as game_id,
     game_name::text as game_name,
@@ -6,7 +8,7 @@ select
     release_date::date as release_date,
     genre::text as genre,
     price::numeric(10, 2) as price,
-    created_at::timestamp as created_at,
-    updated_at::timestamp as updated_at
-from {{ source('bronze', 'games') }}
+    {{ to_utc_timestamptz(src, 'created_at') }} as created_at,
+    {{ to_utc_timestamptz(src, 'updated_at') }} as updated_at
+from {{ src }}
 where _sdc_deleted_at is null

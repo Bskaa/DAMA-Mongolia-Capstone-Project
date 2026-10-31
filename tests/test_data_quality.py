@@ -3,7 +3,12 @@ from __future__ import annotations
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from monitoring.data_quality import evaluate_freshness, evaluate_volume
+from monitoring.data_quality import (
+    _relations,
+    evaluate_freshness,
+    evaluate_volume,
+    soften_for_optional,
+)
 
 
 class DataQualityTests(unittest.TestCase):
@@ -60,6 +65,17 @@ class DataQualityTests(unittest.TestCase):
         status, change = evaluate_volume(0, 100, warn_percent=50)
         self.assertEqual(status, "fail")
         self.assertIsNone(change)
+
+    def test_optional_relation_failures_become_warnings(self) -> None:
+        self.assertEqual(soften_for_optional("fail", optional=True), "warn")
+        self.assertEqual(soften_for_optional("fail", optional=False), "fail")
+        self.assertEqual(soften_for_optional("pass", optional=True), "pass")
+
+    def test_only_rawg_relations_are_optional(self) -> None:
+        optional = {(r.schema, r.table) for r in _relations() if r.optional}
+        self.assertIn(("bronze", "rawg_games"), optional)
+        self.assertIn(("silver", "stg_rawg_game_genres"), optional)
+        self.assertTrue(all("rawg" in table for _, table in optional))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,26 @@
+version: 2
+
+seeds:
+  - name: fx_rates_to_usd
+    description: >
+      Static, illustrative reference rates used to convert purchase amounts to
+      USD for cross-currency KPIs. Original-currency amounts are always kept;
+      replace this file with an authoritative daily rate feed before using the
+      USD figures for financial reporting.
+    config:
+      column_types:
+        currency: text
+        usd_per_unit: numeric(18, 6)
+        rate_date: date
+      meta:
+        owner: finance
+        source_system: manual reference data
+    columns:
+      - name: currency
+        description: ISO 4217 currency code.
+        data_tests: [not_null, unique]
+      - name: usd_per_unit
+        description: USD value of one unit of the currency.
+        data_tests: [not_null]
+      - name: rate_date
+        description: Date the illustrative rate was recorded.

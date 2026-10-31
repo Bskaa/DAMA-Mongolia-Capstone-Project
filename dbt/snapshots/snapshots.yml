@@ -1,0 +1,22 @@
+version: 2
+
+snapshots:
+  - name: snap_players
+    description: >
+      SCD Type 2 history of player attributes (country changes). One row per
+      version; dbt_valid_to is null for the current version.
+    relation: ref('stg_players')
+    config:
+      unique_key: player_id
+      strategy: timestamp
+      updated_at: updated_at
+      hard_deletes: invalidate
+  - name: snap_games
+    description: >
+      SCD Type 2 history of game attributes such as price and genre.
+    relation: ref('stg_games')
+    config:
+      unique_key: game_id
+      strategy: timestamp
+      updated_at: updated_at
+      hard_deletes: invalidate

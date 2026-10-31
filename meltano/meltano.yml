@@ -11,14 +11,17 @@ plugins:
       pip_url: meltanolabs-tap-postgres==0.10.0
       config:
         sqlalchemy_url: $TAP_POSTGRES_SQLALCHEMY_URL
-        # Most dimension/reference streams are small enough to reload in full.
-        # The high-volume fact-like streams below override this to incremental.
+        # Dimension/reference streams (players, games, platforms, game_platforms)
+        # are small and are reloaded in full. Event streams (sessions, purchases,
+        # reviews, achievements) grow every day and replicate incrementally on
+        # updated_at; target-postgres upserts them by primary key.
         default_replication_method: FULL_TABLE
         filter_schemas:
           - public
       metadata:
         public-achievements:
-          replication-method: FULL_TABLE
+          replication-method: INCREMENTAL
+          replication-key: updated_at
         public-game_platforms:
           replication-method: FULL_TABLE
         public-games:

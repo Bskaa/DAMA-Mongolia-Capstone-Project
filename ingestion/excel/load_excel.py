@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import sys
+import uuid
 from zipfile import BadZipFile
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -321,6 +322,29 @@ def _validate_relations(
         )
 
 
+def history_rows(
+    load_id: uuid.UUID,
+    datasets: dict[str, list[dict[str, Any]]],
+    loaded_at: datetime,
+) -> list[tuple[Any, ...]]:
+    """Build append-only audit rows: one JSON record per loaded business row."""
+    key_columns = {spec.file_name: spec.key_column for spec in SPECS}
+    rows: list[tuple[Any, ...]] = []
+    for file_name, records in datasets.items():
+        key_column = key_columns[file_name]
+        for record in records:
+            rows.append(
+                (
+                    load_id,
+                    file_name,
+                    record[key_column],
+                    json.dumps(record, default=str, sort_keys=True),
+                    loaded_at,
+                )
+            )
+    return rows
+
+
 def _replace_snapshot(
     connection: psycopg.Connection[Any],
     datasets: dict[str, list[dict[str, Any]]],
@@ -373,6 +397,26 @@ def _replace_snapshot(
                 """,
                 [{**row, "loaded_at": loaded_at} for row in budgets],
             )
+        load_id = uuid.uuid4()
+        cursor.executemany(
+            """
+            INSERT INTO bronze.business_load_log
+                (load_id, file_name, sha256, row_count, loaded_at)
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            [
+                (load_id, name, hashes[name], row_counts[name], loaded_at)
+                for name in hashes
+            ],
+        )
+        cursor.executemany(
+            """
+            INSERT INTO bronze.business_record_history
+                (load_id, file_name, record_key, record, loaded_at)
+            VALUES (%s, %s, %s, %s::jsonb, %s)
+            """,
+            history_rows(load_id, datasets, loaded_at),
+        )
         cursor.executemany(
             """
             INSERT INTO bronze.business_file_loads (file_name, sha256, row_count, loaded_at)

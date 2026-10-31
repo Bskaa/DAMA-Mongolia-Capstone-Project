@@ -18,6 +18,14 @@ class MonitoredRelation:
     freshness_column: str | None = None
     warn_after_hours: float | None = None
     error_after_hours: float | None = None
+    # Optional relations (the RAWG catalogue) may be empty or stale without
+    # failing the pipeline: RAWG ingestion is skipped when no API key is set.
+    optional: bool = False
+
+
+def soften_for_optional(status: str, optional: bool) -> str:
+    """Report an optional relation's failure as a warning instead."""
+    return "warn" if optional and status == "fail" else status
 
 
 def _relations() -> tuple[MonitoredRelation, ...]:
@@ -43,6 +51,8 @@ def _relations() -> tuple[MonitoredRelation, ...]:
         "raw_game_targets",
         "raw_campaign_budget",
         "business_file_loads",
+        "business_load_log",
+        "business_record_history",
     )
     silver_tables = (
         "stg_players",
@@ -61,6 +71,9 @@ def _relations() -> tuple[MonitoredRelation, ...]:
         "stg_marketing_campaigns",
         "stg_game_targets",
         "stg_campaign_budget",
+        "stg_rawg_game_genres",
+        "stg_business_record_history",
+        "fx_rates_to_usd",
     )
     gold_tables = (
         "bridge_game_platforms",
@@ -73,7 +86,15 @@ def _relations() -> tuple[MonitoredRelation, ...]:
         "fact_purchases",
         "fact_reviews",
         "fact_sessions",
+        "dim_players_history",
+        "dim_games_history",
+        "mart_daily_kpis",
+        "mart_game_target_vs_actual",
+        "mart_campaign_performance",
+        "mart_player_retention",
+        "mart_genre_benchmark",
     )
+    snapshot_tables = ("snap_players", "snap_games")
 
     freshness_warn = _positive_float("DATA_QUALITY_FRESHNESS_WARN_HOURS", 48)
     freshness_error = _positive_float("DATA_QUALITY_FRESHNESS_ERROR_HOURS", 168)
@@ -95,15 +116,21 @@ def _relations() -> tuple[MonitoredRelation, ...]:
         for name in meltano_tables
     ]
     relations.extend(
-        MonitoredRelation("bronze", name, "fetched_at", freshness_warn, freshness_error)
+        MonitoredRelation(
+            "bronze", name, "fetched_at", freshness_warn, freshness_error, optional=True
+        )
         for name in rawg_tables
     )
     relations.extend(
         MonitoredRelation("bronze", name, "loaded_at", excel_warn, excel_error)
         for name in excel_tables
     )
-    relations.extend(MonitoredRelation("silver", name) for name in silver_tables)
+    relations.extend(
+        MonitoredRelation("silver", name, optional=name.startswith("stg_rawg_"))
+        for name in silver_tables
+    )
     relations.extend(MonitoredRelation("gold", name) for name in gold_tables)
+    relations.extend(MonitoredRelation("snapshots", name) for name in snapshot_tables)
     return tuple(relations)
 
 
@@ -249,11 +276,14 @@ def run_quality_checks() -> dict[str, Any]:
                     )
                 else:
                     freshness_status, age_hours = "not_applicable", None
+                freshness_status = soften_for_optional(freshness_status, relation.optional)
+                volume_status = soften_for_optional(volume_status, relation.optional)
 
                 results.append(
                     {
                         "schema": relation.schema,
                         "table": relation.table,
+                        "optional": relation.optional,
                         "row_count": current_count,
                         "last_ingested_at": (
                             last_ingested_at.isoformat()
