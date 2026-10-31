@@ -8,10 +8,17 @@ Two modes share one CLI:
                             existing data. Never deletes or updates rows; new IDs
                             continue from MAX(id) + 1.
 
+With --window-start/--window-end (append only) every generated timestamp falls
+inside that window, so each scheduled batch looks like the events of that hour
+and its updated_at values are newer than Meltano's incremental bookmark.
+
 Examples:
   python -m ingestion.generate.generate_gaming_data
   python -m ingestion.generate.generate_gaming_data --reset --players 100 --games 20
   python -m ingestion.generate.generate_gaming_data --mode append --sessions 2000
+  python -m ingestion.generate.generate_gaming_data --mode append \
+      --window-start 2026-10-31T09:00:00+00:00 --window-end 2026-10-31T10:00:00+00:00 \
+      --players 40 --games 0 --sessions 400 --purchases 120 --reviews 80 --achievements 80
 """
 
 from __future__ import annotations
@@ -21,7 +28,7 @@ import json
 import os
 import random
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Callable, Sequence, TypeVar
 
@@ -119,7 +126,28 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="initial mode only: delete existing source rows before loading.",
     )
+    parser.add_argument(
+        "--window-start",
+        type=_aware_datetime,
+        help="append mode only: earliest event timestamp (ISO 8601, UTC if no offset).",
+    )
+    parser.add_argument(
+        "--window-end",
+        type=_aware_datetime,
+        help="append mode only: latest event timestamp (ISO 8601, UTC if no offset).",
+    )
     args = parser.parse_args(argv)
+
+    if (args.window_start is None) != (args.window_end is None):
+        parser.error("--window-start and --window-end must be given together")
+    if args.window_start is not None:
+        if args.mode != "append":
+            parser.error("--window-start/--window-end are only valid with --mode append")
+        if args.window_start >= args.window_end:
+            parser.error("--window-start must be earlier than --window-end")
+        if args.as_of is not None and args.as_of != args.window_end.date():
+            parser.error("--as-of must equal the date of --window-end when a window is given")
+        args.as_of = args.window_end.astimezone(timezone.utc).date()
 
     defaults = MODE_DEFAULTS[args.mode]
     for name, default in defaults.items():
@@ -146,6 +174,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         if args.achievements > args.players * args.games * len(ACHIEVEMENT_NAMES):
             parser.error("--achievements cannot exceed the number of unique combinations")
     return args
+
+
+def _aware_datetime(value: str) -> datetime:
+    """Parse an ISO 8601 timestamp; naive values are interpreted as UTC."""
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(f"invalid ISO 8601 timestamp: {value!r}") from error
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def pick_unique(
@@ -315,10 +354,17 @@ def run_append(cursor: psycopg.Cursor[Any], args: argparse.Namespace) -> dict[st
     rng = random.Random(args.seed)
     fake = Faker("en_US")
     fake.seed_instance(args.seed)
-    activity_start = utc_start_of_day(BASE_DATE)
-    end_of_day = utc_end_of_day(args.as_of)
-    account_start = utc_start_of_day(ACCOUNT_START)
-    account_end = utc_start_of_day(args.as_of)
+    if args.window_start is not None:
+        # Scheduled batch: new accounts, games and events all happen inside the window.
+        activity_start = account_start = args.window_start
+        end_of_day = account_end = args.window_end
+        new_game_release: date | None = args.window_start.date()
+    else:
+        activity_start = utc_start_of_day(BASE_DATE)
+        end_of_day = utc_end_of_day(args.as_of)
+        account_start = utc_start_of_day(ACCOUNT_START)
+        account_end = utc_start_of_day(args.as_of)
+        new_game_release = None
 
     # 1. Current state (read only).
     cursor.execute("SELECT player_id, created_at FROM players ORDER BY player_id")
@@ -358,7 +404,9 @@ def run_append(cursor: psycopg.Cursor[Any], args: argparse.Namespace) -> dict[st
 
     first_game_id = _max_id(cursor, "games") + 1
     for game_id in range(first_game_id, first_game_id + args.games):
-        game, pairs = make_game(rng, fake, game_id, args.as_of, platform_ids)
+        game, pairs = make_game(
+            rng, fake, game_id, args.as_of, platform_ids, release_date=new_game_release
+        )
         games[game_id] = (game[4], game[6])
         game_platforms[game_id] = [pair[1] for pair in pairs]
         new["games"].append(game)
@@ -439,6 +487,9 @@ def run_append(cursor: psycopg.Cursor[Any], args: argparse.Namespace) -> dict[st
 
     _sync_sequences(cursor)
     report: dict[str, Any] = {"mode": "append", **table_counts(cursor)}
+    if args.window_start is not None:
+        report["window_start"] = args.window_start.isoformat()
+        report["window_end"] = args.window_end.isoformat()
     report.update({f"appended_{table}": len(rows) for table, rows in new.items()})
     report.update(validate_source(cursor))
     if report["invalid_sessions"] or report["invalid_session_dates"]:

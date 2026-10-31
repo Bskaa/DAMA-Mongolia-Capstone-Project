@@ -230,6 +230,9 @@ def run_quality_checks() -> dict[str, Any]:
                     volume_status TEXT NOT NULL,
                     PRIMARY KEY (run_id, schema_name, table_name)
                 );
+                -- Column count per relation, so schema changes become visible over time.
+                ALTER TABLE monitoring.data_quality_snapshots
+                    ADD COLUMN IF NOT EXISTS column_count INTEGER;
                 """
             )
 
@@ -263,6 +266,12 @@ def run_quality_checks() -> dict[str, Any]:
                     )
                 cursor.execute(count_query)
                 current_count, last_ingested_at = cursor.fetchone()
+                cursor.execute(
+                    "SELECT COUNT(*) FROM information_schema.columns "
+                    "WHERE table_schema = %s AND table_name = %s",
+                    (relation.schema, relation.table),
+                )
+                column_count = int(cursor.fetchone()[0])
 
                 volume_status, change_percent = evaluate_volume(
                     current_count, previous_count, volume_warn_percent
@@ -285,6 +294,7 @@ def run_quality_checks() -> dict[str, Any]:
                         "table": relation.table,
                         "optional": relation.optional,
                         "row_count": current_count,
+                        "column_count": column_count,
                         "last_ingested_at": (
                             last_ingested_at.isoformat()
                             if last_ingested_at is not None
@@ -345,9 +355,10 @@ def run_quality_checks() -> dict[str, Any]:
                 """
                 INSERT INTO monitoring.data_quality_snapshots (
                     run_id, schema_name, table_name, row_count, last_ingested_at,
-                    freshness_status, volume_change_percent, volume_status
+                    freshness_status, volume_change_percent, volume_status,
+                    column_count
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 [
                     (
@@ -359,6 +370,7 @@ def run_quality_checks() -> dict[str, Any]:
                         item["freshness_status"],
                         item["volume_change_percent"],
                         item["volume_status"],
+                        item["column_count"],
                     )
                     for item in results
                 ],

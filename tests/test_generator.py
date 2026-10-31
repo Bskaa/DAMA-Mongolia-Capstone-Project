@@ -60,6 +60,20 @@ class ParseArgsTests(unittest.TestCase):
     def test_reset_is_rejected_in_append_mode(self) -> None:
         self.assertIn("--reset is only valid", parse_error(["--mode", "append", "--reset"]))
 
+    def test_window_sets_as_of_and_is_append_only(self) -> None:
+        args = parse_args([
+            "--mode", "append",
+            "--window-start", "2026-10-31T08:00:00+08:00",
+            "--window-end", "2026-10-31T09:00:00+08:00",
+        ])
+        self.assertEqual(args.window_start.isoformat(), "2026-10-31T00:00:00+00:00")
+        self.assertEqual(args.as_of, date(2026, 10, 31))
+        self.assertIn("only valid with --mode append",
+                      parse_error(["--window-start", "2026-10-31T00:00", "--window-end", "2026-10-31T01:00"]))
+        self.assertIn("must be given together", parse_error(["--mode", "append", "--window-start", "2026-10-31T00:00"]))
+        self.assertIn("earlier than", parse_error(
+            ["--mode", "append", "--window-start", "2026-10-31T02:00", "--window-end", "2026-10-31T01:00"]))
+
     def test_initial_rejects_more_reviews_than_player_game_pairs(self) -> None:
         self.assertIn("--reviews", parse_error(["--players", "2", "--games", "2", "--reviews", "5"]))
 

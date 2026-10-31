@@ -59,7 +59,7 @@ flowchart LR
 | Silver | `silver` | Typed dbt views (UTC `timestamptz`), soft-deleted rows removed, FX seed | dbt | No |
 | Snapshots | `snapshots` | SCD Type 2 history of players and games | dbt snapshots | No |
 | Gold | `gold` | Dimensions, facts, bridge table and business marts | dbt | **Yes** (`analytics_reader`) |
-| Observability | `monitoring` | Data-quality runs and relation snapshots | Quality monitor | No |
+| Observability | `monitoring` | Quality runs, relation snapshots, dbt node results, Airflow task runs, alert log | Monitoring scripts, DAG callbacks | No |
 
 ### Airflow DAG
 
@@ -70,12 +70,13 @@ flowchart LR
     B --> D[load_business_workbooks]
     D --> E[dbt_build]
     C -. skipped is OK .-> E
-    E --> F[monitor_data_quality] --> G[email_data_quality_report]
+    E --> H[collect_dbt_results] --> F[monitor_data_quality] --> G[check_and_alert]
 ```
 
 - `ingest_rawg` runs in parallel with Meltano. If the API key is missing or the API fails, the task is **skipped** (not failed) and `dbt_build` reuses the previously loaded RAWG data.
 - `dbt_build` runs `dbt build`: seeds, snapshots, models, data tests, unit tests and contracts in dependency order. A failing test stops everything downstream of it, so bad data never reaches Gold.
-- `email_data_quality_report` is skipped when SMTP is not configured (or `QUALITY_EMAIL_ENABLED=false`), so an optional feature never turns the run red.
+- `collect_dbt_results`, `monitor_data_quality` and `check_and_alert` run even when an earlier task failed (`all_done`): the pipeline first measures, then judges. See [Operational monitoring and alerting](#6a-operational-monitoring-and-alerting).
+- Every task in every DAG records its tries in `monitoring.task_runs`; a task that fails after its retries is emailed immediately.
 
 ## Technology stack
 
@@ -100,7 +101,11 @@ flowchart LR
 ```text
 .
 ├── .github/workflows/ci.yml              # CI: static checks + end-to-end dbt build
-├── airflow/dags/gaming_analytics_pipeline.py
+├── airflow/dags/
+│   ├── gaming_analytics_pipeline.py      # Daily ingestion, dbt build, quality checks
+│   ├── gaming_source_data_generator.py   # Hourly synthetic traffic into the source DB
+│   ├── pipeline_watchdog.py              # Independent 10:00 watchdog + alert_drill
+│   └── pipeline_ops/                     # Shared env + task callbacks (in .airflowignore)
 ├── dashboard/app.py                      # Streamlit app (6 tabs, read-only role)
 ├── data/business/                        # marketing_campaigns, game_targets, budget workbooks
 ├── dbt/
@@ -122,7 +127,12 @@ flowchart LR
 │   └── generate/                         # generate_gaming_data CLI (--mode initial|append) + common.py
 ├── metadata/ingest_postgres.py           # OpenMetadata PostgreSQL workflow
 ├── meltano/meltano.yml
-├── monitoring/data_quality.py            # Freshness and volume checks
+├── monitoring/
+│   ├── data_quality.py                   # Freshness, volume and column-count checks
+│   ├── collect_dbt_results.py            # dbt run_results.json -> monitoring.dbt_node_results
+│   ├── task_events.py                    # Airflow task tries -> monitoring.task_runs
+│   ├── checks.sql                        # The 12 alert rules
+│   └── alerts.py                         # Rules -> one email + monitoring.alert_log
 ├── sql/                                  # Source DDL, Bronze DDL, migrations, access roles
 ├── tests/                                # Python unit tests and CI fixtures
 ├── .env.example
@@ -185,8 +195,8 @@ The same definitions are stored as dbt descriptions and appear in OpenMetadata.
 | Data architecture | Medallion zones with one writer per zone; Kimball star schema in Gold |
 | Data modelling | Declared grains, surrogate `date_key`, bridge table, SCD Type 2 history, contract on `mart_daily_kpis` |
 | Data integration | Meltano incremental replication, validated API and Excel loaders, idempotent upserts |
-| Data quality | dbt tests mapped to quality dimensions (below) plus freshness and volume monitoring |
-| Metadata management | Descriptions, owners, data stewards, classification and PII flags in dbt YAML; OpenMetadata catalogue and lineage |
+| Data quality | dbt tests mapped to quality dimensions (below), freshness/volume/schema monitoring with history, 12 alert rules with once-per-day emails |
+| Metadata management | Descriptions, owners, data stewards, classification and PII flags in dbt YAML; OpenMetadata catalogue and lineage; operational metadata (dbt results, task runs, alerts) kept as history in `monitoring` |
 | Data security | Least-privilege roles; dashboard login reads Gold only, in read-only transactions |
 | Reference and master data | `fx_rates_to_usd` seed; conformed `dim_games` / `dim_players` with history |
 | Data warehousing and BI | Gold marts and the Streamlit dashboard |
@@ -238,6 +248,7 @@ Gold is the only schema granted to the `analytics_reader` role, so the dashboard
 | Incremental facts with a 3-day lookback | Absorbs late-arriving updates while keeping runs fast | Rows deleted at source stay until `dbt build --full-refresh` |
 | UTC storage, reporting time zone as a variable | Stable day boundaries regardless of server/session time zone | Change `reporting_timezone` to `Asia/Ulaanbaatar` for local-day reporting |
 | Gold-only reader role | Least privilege and PII protection | New schemas must be granted deliberately |
+| Alerts read only the `monitoring` history, each problem emailed once per day, ✅ when clean | Cheap enough to run several times a day; repeated alerts get muted, and a missing ✅ means the pipeline is dead | Needs one day of history before trend rules (slow task, warning grew) can fire |
 | Targets compared with all warehouse activity | The workbook has no target period column | Add `target_year` to the workbook to compare per period |
 
 ## Prerequisites and configuration
@@ -260,7 +271,8 @@ Set a strong `POSTGRES_PASSWORD` and make `DATABASE_URL` match it. Do not commit
 | `ANALYTICS_DB`, `ANALYTICS_PORT` | Analytics loaders and dbt | Default host port `5433` |
 | `DASHBOARD_DB_USER`, `DASHBOARD_DB_PASSWORD` | Dashboard | Read-only Gold login created by `sql/006_access_roles.sql` |
 | `RAWG_API_KEY`, `RAWG_MAX_PAGES` | RAWG ingestion | Page count limits API usage |
-| `AIRFLOW__SMTP__*`, `QUALITY_ALERT_EMAIL_TO`, `QUALITY_EMAIL_ENABLED` | Airflow email report | Report is skipped when not configured |
+| `AIRFLOW__SMTP__*`, `QUALITY_ALERT_EMAIL_TO`, `QUALITY_EMAIL_ENABLED` | Alert emails | Without them alerts are only logged in `monitoring.alert_log` |
+| `ALERT_NAME`, `ALERT_TIMEZONE` | Alert emails | Name in the subject line; business day for "once per day" (default `Asia/Ulaanbaatar`) |
 | `OPENMETADATA_MYSQL_ROOT_PASSWORD`, `OPENMETADATA_JWT_TOKEN` | OpenMetadata | Only for the `openmetadata` profile |
 | `DATA_QUALITY_*` | Quality monitor | Optional threshold overrides |
 
@@ -330,6 +342,10 @@ One CLI, `ingestion.generate.generate_gaming_data`, creates deterministic, refer
 .\.venv\Scripts\python.exe -m ingestion.generate.generate_gaming_data --reset
 # Append a daily-sized batch (any count can be 0)
 .\.venv\Scripts\python.exe -m ingestion.generate.generate_gaming_data --mode append --sessions 2000 --purchases 500
+# One hour of events (what the hourly DAG runs); all timestamps fall inside the window
+.\.venv\Scripts\python.exe -m ingestion.generate.generate_gaming_data --mode append `
+    --window-start 2026-10-31T09:00:00+08:00 --window-end 2026-10-31T10:00:00+08:00 `
+    --players 40 --games 0 --sessions 400 --purchases 120 --reviews 80 --achievements 80
 # All options and per-mode defaults
 .\.venv\Scripts\python.exe -m ingestion.generate.generate_gaming_data --help
 ```
@@ -404,6 +420,48 @@ Detects empty relations, stale ingestion and large row-count changes across Bron
 
 Thresholds: `DATA_QUALITY_VOLUME_CHANGE_WARN_PERCENT`, `DATA_QUALITY_FRESHNESS_WARN_HOURS`, `DATA_QUALITY_FRESHNESS_ERROR_HOURS` and the Excel freshness variables.
 
+### 6a. Operational monitoring and alerting
+
+The warehouse tables describe the business; the `monitoring` schema describes the **pipeline**. Airflow, dbt and PostgreSQL only know the current state, so every run is stored as history. That history is what makes "the warning grew from 71 to 140" or "this task is 3x slower than usual" visible at all.
+
+| Table | Written by | One row per |
+| --- | --- | --- |
+| `monitoring.data_quality_runs`, `data_quality_snapshots` | `monitoring.data_quality` | check run / relation (rows, columns, freshness, volume) |
+| `monitoring.dbt_node_results` | `monitoring.collect_dbt_results` (after `dbt_build`) | dbt node per invocation (status, seconds, failures) |
+| `monitoring.task_runs` | Airflow callbacks (`airflow/dags/pipeline_ops`) | task try (state, duration) |
+| `monitoring.alert_log` | `monitoring.alerts` | alert that fired (sent or not) |
+
+`monitoring/checks.sql` holds the rules. Each returns `severity, check_name, object, detail`; zero rows means all is well.
+
+| # | Rule | Severity | Fires when |
+| --- | --- | --- | --- |
+| 1 | `stale_source` | critical / warn | Freshness of a Bronze source failed / warned (never-loaded optional RAWG is ignored) |
+| 2 | `empty_relation` | critical | A required relation has 0 rows |
+| 3 | `volume_jump` | warn | Row count changed more than the volume threshold |
+| 4 | `rows_disappeared` | critical | An append-only table (events, accounts, facts, snapshots) shrank |
+| 5 | `schema_changed` | warn | A relation gained or lost columns |
+| 6 | `dbt_failed` | critical | A dbt model, snapshot, seed or test errored or failed |
+| 7 | `dbt_skipped` | warn | dbt skipped nodes because something upstream failed |
+| 8 | `warning_grew` | warn | A dbt test warning is new or has more failing rows than last time |
+| 9 | `task_failed` | critical | An Airflow task failed today after its retries |
+| 10 | `slow_task` | warn | A task took over 60 s and 3x its 7-day average |
+| 11 | `pipeline_silent` | critical | No quality check ran today: silence must not look like health |
+| 12 | `generator_silent` | warn | The hourly generator has not succeeded for 3 hours |
+
+`monitoring.alerts` turns rows into **one email** per run (grouped by rule, at most five examples each), sends each problem **once per day**, sends a short **✅ "all checks passed"** when nothing fired, and exits with code 1 on a critical problem so `check_and_alert` turns red.
+
+Two small extra DAGs (`airflow/dags/pipeline_watchdog.py`):
+
+- `pipeline_watchdog` runs the same rules at 10:00 on its own schedule, so a pipeline that died before its own `check_and_alert` is still reported (`pipeline_silent`). It stays quiet when all is fine.
+- `alert_drill` is never scheduled: trigger it by hand once. It fails on purpose; a `task_failed` email proves the alert chain works before a real failure does.
+
+```powershell
+.\.venv\Scripts\python.exe -m monitoring.alerts --dry-run      # what would be sent; sends and logs nothing
+docker compose exec airflow airflow dags trigger alert_drill    # expect a "task failed" email
+```
+
+Both watcher DAGs live in the same Airflow: if the scheduler itself is down, nothing runs. A heartbeat from outside (a cron job or uptime service checking `monitoring.data_quality_runs`) is the honest answer to "who watches the watcher".
+
 ### 7. Airflow orchestration
 
 The DAG runs daily at `02:00` `Asia/Ulaanbaatar`, with `catchup=False`, one active run and one retry per task. Airflow runs in `standalone` mode with the LocalExecutor and its default SQLite metadata database, which is suitable for a single-user learning environment only.
@@ -417,6 +475,27 @@ docker compose exec airflow cat /opt/airflow/standalone_admin_password.txt
 ```
 
 The UI is at `http://localhost:8080`; the last command prints the local admin password created on first start.
+
+### 7a. Hourly source traffic (`gaming_source_data_generator`)
+
+A second DAG simulates live traffic by appending **one hour of activity** to the source database every hour (`0 * * * *`, `catchup=False`, one active run).
+
+| Setting | Value | Why |
+| --- | --- | --- |
+| Generator call | `--mode append --window-start <data_interval_start> --window-end <data_interval_end>` | Every new account, game and event is timestamped inside that hour, so `updated_at` is newer than Meltano's bookmark and the daily 02:00 sync picks it up |
+| Seed | CRC32 of the window | A retry of the same hour regenerates the same batch; the generator writes in one transaction, so a failed attempt leaves nothing |
+| Base volume per average hour | 40 players, 400 sessions, 120 purchases, 80 reviews, 80 achievements | A weekday totals 24 x base (≈ 9 600 sessions), matching the daily append defaults |
+| Traffic curve | Asia/Ulaanbaatar hours: night ≈ 0.2x, evening peak ≈ 2x; weekends +20 % | Realistic DAU and retention patterns in the marts |
+| New games | one every 24 hours (`new_game_every_hours`) plus `games` extra per run | New releases are rare |
+| Retries | 2, 2 minutes apart; 20-minute timeout | Transient database errors |
+
+All values are DAG params: change them for one run with **Trigger DAG w/ config** in the Airflow UI, or set `seasonality` to `false` for a flat rate. The source must be seeded once with `--mode initial` first; otherwise the task fails with that hint.
+
+```powershell
+docker compose exec airflow airflow dags trigger gaming_source_data_generator
+docker compose exec airflow airflow dags trigger gaming_source_data_generator --conf '{"sessions": 2000, "seasonality": false}'   # PowerShell 7+
+docker compose exec airflow airflow dags pause gaming_source_data_generator   # stop generating
+```
 
 ### 8. Dashboard
 
@@ -528,7 +607,8 @@ Named Docker volumes preserve database, Airflow, Meltano and OpenMetadata state.
 | `relationships` test fails on `currency` | Add the new currency to `dbt/seeds/fx_rates_to_usd.csv` |
 | Dashboard: "Set DASHBOARD_DB_PASSWORD" | Add it to `.env` and run `sql/006_access_roles.sql` (Quick start step 6) |
 | Dashboard: permission denied for schema gold | Run `dbt build` (it grants Gold to `analytics_reader`) |
-| Email report task is *skipped* | Expected until SMTP variables and `QUALITY_ALERT_EMAIL_TO` are set |
+| No alert emails arrive | Set the `AIRFLOW__SMTP__*` variables and `QUALITY_ALERT_EMAIL_TO`, then trigger `alert_drill`; until then alerts are only in `monitoring.alert_log` |
+| `check_and_alert` is red | A critical rule fired: read the email or `SELECT * FROM monitoring.alert_log ORDER BY alert_id DESC` |
 | Airflow DAG is missing | `docker compose exec airflow airflow dags list-import-errors`; rebuild after dependency changes |
 
 ## License and intended use

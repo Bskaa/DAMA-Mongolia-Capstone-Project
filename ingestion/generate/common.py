@@ -148,11 +148,17 @@ def make_game(
     game_id: int,
     as_of: date,
     platform_ids: Sequence[int],
+    release_date: date | None = None,
 ) -> tuple[Row, list[Row]]:
-    """Return the game row and its game_platforms rows (1-4 supported platforms)."""
-    release_date = date(rng.randint(2010, as_of.year), rng.randint(1, 12), 1)
-    if release_date > as_of:
-        release_date = as_of
+    """Return the game row and its game_platforms rows (1-4 supported platforms).
+
+    Without `release_date` the game gets a random release month between 2010
+    and `as_of`; hourly append runs pass the run's date so new games are new.
+    """
+    if release_date is None:
+        release_date = date(rng.randint(2010, as_of.year), rng.randint(1, 12), 1)
+        if release_date > as_of:
+            release_date = as_of
     created_at = utc_start_of_day(release_date)
     price = Decimal(str(rng.choice(PRICE_POINTS)))
     game = (
