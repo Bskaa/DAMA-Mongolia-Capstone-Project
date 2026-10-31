@@ -262,6 +262,12 @@ ssh -N -L 8080:127.0.0.1:8080 -L 8501:127.0.0.1:8501 -L 8585:127.0.0.1:8585 <use
 Дараа нь браузерт: Airflow `http://localhost:8080` (admin + алхам 7-ийн нууц үг),
 Dashboard `http://localhost:8501`.
 
+> **Windows дээр `bind [127.0.0.1]:8080: Permission denied`** гарвал тэр порт таны компьютер
+> дээр нөөцлөгдсөн (Hyper-V/WSL/Docker Desktop) эсвэл завгүй байна. Зөвхөн *локал* портыг
+> солино: `ssh -N -L 18080:127.0.0.1:8080 -L 18501:127.0.0.1:8501 <user>@<vps-ip>` →
+> `http://localhost:18080`, `http://localhost:18501`. Нөөцлөгдсөн мужийг харах:
+> `netsh interface ipv4 show excludedportrange protocol=tcp`.
+
 **Амжилт:** Dashboard-ын 7 таб бүгд өгөгдөлтэй; "Pipeline health" табд өнөөдрийн quality шалгалт.
 
 ---

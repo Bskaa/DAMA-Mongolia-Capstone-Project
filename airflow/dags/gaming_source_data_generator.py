@@ -92,13 +92,23 @@ def window_seed(window_start: datetime, window_end: datetime) -> int:
 
 
 def run_window(context: dict[str, Any]) -> tuple[datetime, datetime]:
-    """The run's data interval; manual runs without one use the previous full hour."""
+    """The hour this run generates.
+
+    * A real data interval (start < end) is used as is.
+    * Airflow 3 cron schedules (CronTriggerTimetable) give an empty interval
+      (start == end == logical date): the run at 13:00 generates 12:00-13:00.
+      Anchoring on the logical date, not the clock, keeps a retry or a late start
+      on the same hour (and the same seed).
+    * Manual runs anchor on their logical date too (= trigger time), so they
+      generate the previous full hour; with no date at all, the clock is used.
+    """
     start = context.get("data_interval_start")
     end = context.get("data_interval_end")
-    if start is None or end is None or start >= end:
-        end = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
-        start = end - timedelta(hours=1)
-    return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+    if start is not None and end is not None and start < end:
+        return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+    anchor = context.get("logical_date") or end or datetime.now(timezone.utc)
+    end = anchor.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    return end - timedelta(hours=1), end
 
 
 def generate_hour(**context: Any) -> dict[str, Any]:

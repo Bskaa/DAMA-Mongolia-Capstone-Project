@@ -66,6 +66,18 @@ class WindowTests(unittest.TestCase):
         self.assertEqual(end - start, timedelta(hours=1))
         self.assertEqual((end.minute, end.second, end.microsecond), (0, 0, 0))
 
+    def test_airflow3_cron_runs_generate_the_hour_before_the_logical_date(self) -> None:
+        # CronTriggerTimetable: data interval is empty, start == end == logical date.
+        logical = datetime(2026, 10, 31, 13, tzinfo=UTC)
+        context = {"data_interval_start": logical, "data_interval_end": logical, "logical_date": logical}
+        self.assertEqual(DAG_MODULE.run_window(context), (logical - timedelta(hours=1), logical))
+
+    def test_late_start_or_retry_keeps_the_same_hour(self) -> None:
+        logical = datetime(2026, 10, 31, 13, 0, 0, 500, tzinfo=UTC)
+        context = {"data_interval_start": None, "data_interval_end": None, "logical_date": logical}
+        start, end = DAG_MODULE.run_window(context)
+        self.assertEqual((start.hour, end.hour), (12, 13))
+
     def test_seed_is_stable_per_window(self) -> None:
         start = datetime(2026, 10, 31, 9, tzinfo=UTC)
         end = start + timedelta(hours=1)
