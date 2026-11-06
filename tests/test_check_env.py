@@ -47,6 +47,13 @@ class CheckEnvTests(unittest.TestCase):
     def test_short_jwt_secret_is_an_error(self) -> None:
         self.assertIn("ERROR", levels(dict(GOOD, AIRFLOW__API_AUTH__JWT_SECRET="short")))
 
+    def test_loopback_bind_is_quiet_and_public_bind_warns(self) -> None:
+        def bind_warnings(env):
+            return [m for level, m in audit_env(env) if level == "WARN" and "PUBLIC_BIND_ADDRESS" in m]
+        self.assertEqual(bind_warnings(GOOD), [])
+        self.assertEqual(bind_warnings(dict(GOOD, PUBLIC_BIND_ADDRESS="127.0.0.1")), [])
+        self.assertEqual(len(bind_warnings(dict(GOOD, PUBLIC_BIND_ADDRESS="0.0.0.0"))), 1)
+
     def test_values_are_never_printed(self) -> None:
         env = dict(GOOD, DASHBOARD_DB_PASSWORD=GOOD["POSTGRES_PASSWORD"])
         self.assertFalse(any(GOOD["POSTGRES_PASSWORD"] in message for _, message in audit_env(env)))

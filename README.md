@@ -653,7 +653,7 @@ Named Docker volumes preserve database, Airflow, Meltano and OpenMetadata state.
 ## Security and deployment notes
 
 - Secrets live only in the ignored `.env` file. Run `python -m scripts.check_env` before starting the stack: it reports placeholders, mismatched or reused passwords, short secrets and non-URL-safe characters, without printing any value.
-- PostgreSQL, Airflow, Streamlit and OpenMetadata ports bind to `127.0.0.1`.
+- PostgreSQL ports always bind to `127.0.0.1`. Airflow, Streamlit and OpenMetadata bind to `PUBLIC_BIND_ADDRESS` (default `127.0.0.1`, SSH tunnel only); set it to `0.0.0.0` only together with a `DOCKER-USER` firewall allowlist, because Docker-published ports bypass `ufw` ([docs/deploy_vps.md](docs/deploy_vps.md), step 10b).
 - The dashboard uses a dedicated `dashboard_user` login that can only `SELECT` from Gold, with `default_transaction_read_only` and a statement timeout; it runs as a non-root user without Linux capabilities.
 - Bronze, Silver, snapshots and monitoring are not granted to any BI role; PII stays there.
 - This is not a production deployment: there is no HA, no remote secret manager, no TLS termination and no tested disaster-recovery process. The OpenMetadata/OpenSearch configuration is for isolated local learning only.

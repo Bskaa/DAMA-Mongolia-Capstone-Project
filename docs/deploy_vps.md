@@ -272,6 +272,75 @@ Dashboard `http://localhost:8501`.
 
 ---
 
+## 10б. Шууд IP-аар хандах (SSH tunnel-гүй, заавал биш)
+
+`PUBLIC_BIND_ADDRESS=0.0.0.0` гэвэл **зөвхөн** Airflow (8080), dashboard (8501), OpenMetadata
+(8585) серверийн IP дээр нээгдэнэ. Database-ууд (`POSTGRES_PORT`, `ANALYTICS_PORT`) ямагт
+`127.0.0.1`-д үлдэнэ.
+
+> **Анхаар.** Docker портыг iptables-ээр өөрөө нээдэг тул **`ufw` дүрэм Docker-ийн портыг
+> хаадаггүй**. Хязгаарлалтыг `DOCKER-USER` chain-д хийнэ. Тиймээс эхлээд firewall, дараа нь порт.
+
+**1. Өөрийн public IP-г олох** (өөрийн компьютер дээр, PowerShell):
+
+```powershell
+Invoke-RestMethod https://ifconfig.me/ip
+```
+
+**2. Firewall: зөвхөн итгэмжит IP-г зөвшөөрөх** (VPS дээр):
+
+```bash
+IFACE=$(ip route show default | awk '{print $5; exit}')
+MYIP=<1-р алхмын IP>                       # жишээ: 203.0.113.25
+sudo iptables -I DOCKER-USER -i "$IFACE" -p tcp -m multiport --dports 8080,8501,8585 -m conntrack --ctstate NEW -j DROP
+sudo iptables -I DOCKER-USER -i "$IFACE" -p tcp -m multiport --dports 8080,8501,8585 -s "$MYIP" -j ACCEPT
+sudo iptables -L DOCKER-USER -n --line-numbers
+```
+
+- Дараалал чухал: `ACCEPT` мөр `DROP`-оос **дээр** байх ёстой (хоёр дахь команд дээд талд оруулна).
+- Багш эсвэл өөр хүнд нээх бол түүний IP-аар `ACCEPT` командыг давтана.
+- Портын дугаар нь контейнерийн порт (8080, 8501, 8585) тул `.env`-д `*_PORT` өөрчилсөн ч дүрэм хэвээр.
+- Сервер дахин ачаалагдвал дүрэм арилна: `sudo iptables -L DOCKER-USER -n`-ээр шалгаад алга бол 2-р
+  алхмыг давтана. Хостингийн самбар дээр firewall байвал тэнд ч мөн адил хязгаарлаж болно.
+
+**3. OpenMetadata-ийн admin нууц үгийг солих** (`admin` хэвээр бол интернэтэд нээхгүй):
+UI → баруун дээд буланд профайл → **Change Password**. Airflow-ийн нууц үг аль хэдийн санамсаргүй;
+dashboard нэвтрэлтгүй, зөвхөн Gold-ыг уншина.
+
+**4. Портуудыг нээх:**
+
+```bash
+grep -q '^PUBLIC_BIND_ADDRESS=' .env && sed -i 's/^PUBLIC_BIND_ADDRESS=.*/PUBLIC_BIND_ADDRESS=0.0.0.0/' .env \
+  || echo 'PUBLIC_BIND_ADDRESS=0.0.0.0' >> .env
+python3 -m scripts.check_env              # PUBLIC_BIND_ADDRESS гэсэн WARN гарна: хүлээгдэж буй
+docker compose --profile orchestration --profile dashboard --profile openmetadata up -d --wait \
+  airflow dashboard openmetadata-server
+docker compose --profile orchestration --profile dashboard --profile openmetadata ps --format "table {{.Service}}\t{{.Ports}}"
+```
+
+`up -d` нь эдгээр гурван контейнерийг шинэ порттой дахин үүсгэнэ (өгөгдөл volume-д хадгалагдана).
+Pipeline ажиллаж байх үед хийхгүй.
+
+**Амжилт:**
+- `ps`: airflow, dashboard, openmetadata-server нь `0.0.0.0:…->…`; postgres-source,
+  postgres-analytics нь `127.0.0.1:…` хэвээр.
+- Өөрийн компьютерийн браузерт: `http://<vps-ip>:8080`, `http://<vps-ip>:8501`, `http://<vps-ip>:8585`.
+- Өөр сүлжээнээс (жишээ нь утасны мобайл дата) нээхэд **хүлээгээд нээгдэхгүй** байх ёстой: firewall ажиллаж байна.
+
+**Буцаах (дахин зөвхөн tunnel):**
+
+```bash
+sed -i 's/^PUBLIC_BIND_ADDRESS=.*/PUBLIC_BIND_ADDRESS=127.0.0.1/' .env
+docker compose --profile orchestration --profile dashboard --profile openmetadata up -d --wait \
+  airflow dashboard openmetadata-server
+sudo iptables -L DOCKER-USER -n --line-numbers  # нэмсэн мөрүүдийг дугаараар нь: sudo iptables -D DOCKER-USER <N>
+```
+
+> HTTP шифрлэгдээгүй тул нууц үг сүлжээгээр ил дамжина. Капстоун demo-д хангалттай; урт хугацаанд
+> tunnel хэрэглэх эсвэл TLS-тэй reverse proxy (жишээ нь Caddy) тавина.
+
+---
+
 ## 11. Цаг тутмын урсгалыг шалгах
 
 `gaming_source_data_generator` цаг бүрийн 00 минутад ажиллана. Хүлээхгүйгээр:
@@ -337,6 +406,7 @@ lineage (silver → gold); `silver.stg_players.username` дээр `DataGovernanc
 | `dbt_build` улаан | `psqla "select node_name, status, message from monitoring.dbt_node_results where status in ('error','fail') order by generated_at desc limit 10"` |
 | Meltano алдаа | `docker compose --profile orchestration build --no-cache airflow` |
 | Dashboard "permission denied" | `dbt_build` нэг удаа амжилттай ажилласан эсэх (Gold-д grant өгдөг) |
+| IP-аар нээгдэхгүй (timeout) | `sudo iptables -L DOCKER-USER -n`: таны IP-ийн `ACCEPT` мөр `DROP`-оос дээр байгаа эсэх; IP тань өөрчлөгдсөн эсэх (`ifconfig.me`) |
 | Санах ой дутуу (OOM) | `docker stats`; OpenMetadata-г зогсооно: `docker compose --profile openmetadata stop` |
 
 Бүгдийг зогсоох (өгөгдөл хадгалагдана): `docker compose --profile orchestration --profile dashboard --profile openmetadata stop`.

@@ -656,7 +656,7 @@ docker compose stop postgres-source postgres-analytics
 ## Аюулгүй байдал ба байршуулалтын тэмдэглэл
 
 - Нууцууд зөвхөн git-д ороогүй `.env` файлд байна. Стекийг асаахаас өмнө `python -m scripts.check_env` ажиллуулна: тэр placeholder, таарахгүй эсвэл давхар ашигласан нууц үг, богино нууц, URL-д аюултай тэмдэгтийг ямар ч утга хэвлэхгүйгээр мэдээлнэ.
-- PostgreSQL, Airflow, Streamlit, OpenMetadata-ийн портууд `127.0.0.1`-д холбогдоно.
+- PostgreSQL-ийн портууд ямагт `127.0.0.1`-д холбогдоно. Airflow, Streamlit, OpenMetadata нь `PUBLIC_BIND_ADDRESS`-д холбогдоно (анхдагч `127.0.0.1`, зөвхөн SSH tunnel); Docker-ийн нээсэн порт `ufw`-г тойрдог тул `0.0.0.0` болгохдоо заавал `DOCKER-USER` firewall-ын зөвшөөрлийн жагсаалттай хамт хийнэ ([deploy_vps.md](deploy_vps.md), 10б алхам).
 - Dashboard нь зөвхөн Gold-оос `SELECT` хийж чаддаг тусгай `dashboard_user` нэвтрэлтийг `default_transaction_read_only` болон statement timeout-тэй ашиглана; Linux capability-гүй, root биш хэрэглэгчээр ажиллана.
 - Bronze, Silver, snapshots, monitoring-д ямар ч BI ролид эрх олгоогүй; PII тэнд үлдэнэ.
 - Энэ нь production байршуулалт биш: HA, алсын нууцын менежер, TLS termination, туршсан гамшгаас сэргээх процесс байхгүй. OpenMetadata/OpenSearch-ийн тохиргоо зөвхөн тусгаарлагдсан локал сургалтад зориулагдсан.

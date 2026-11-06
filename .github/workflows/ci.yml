@@ -1,0 +1,205 @@
+# Continuous integration for the Gaming Analytics Data Platform.
+#
+# Runs on every push and pull request:
+#   1. static-checks   - no database: byte-compile, Python unit tests, dbt parse,
+#                        docker compose config for every profile.
+#   2. dbt-integration - real PostgreSQL: synthetic source data, emulated Meltano
+#                        sync, Excel workbooks, access roles, two dbt builds
+#                        (full + incremental/snapshot path) and a security check
+#                        that dashboard_user reads Gold but not Silver.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch cancels the run that is still going.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.11"
+  # Placeholders only: CI never talks to OpenMetadata, but dbt_project.yml reads them.
+  OPENMETADATA_HOST_PORT: http://localhost:8585/api
+  OPENMETADATA_JWT_TOKEN: ci-only-placeholder
+  OPENMETADATA_SERVICE_NAME: gaming-analytics-ci
+
+jobs:
+  static-checks:
+    name: Static checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DBT_HOST: localhost
+      ANALYTICS_PORT: "5433"
+      ANALYTICS_DB: gaming_analytics
+      POSTGRES_USER: gaming
+      POSTGRES_PASSWORD: ci-only-placeholder
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Byte-compile all Python code
+        run: python -m compileall -q ingestion monitoring dashboard tests airflow scripts metadata
+
+      - name: Run Python unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: dbt parse (no database needed)
+        run: dbt parse --no-partial-parse --project-dir dbt --profiles-dir dbt
+
+      - name: Validate docker compose for every profile
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+          for profile in ingestion orchestration dashboard openmetadata; do
+            echo "Checking profile: $profile"
+            docker compose --profile "$profile" config --quiet
+          done
+
+  dbt-integration:
+    name: dbt build on PostgreSQL
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: static-checks
+
+    # A throwaway PostgreSQL 17 that lives only for this job.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: gaming
+          POSTGRES_PASSWORD: ci-only-placeholder
+          POSTGRES_DB: gaming_analytics
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gaming -d gaming_analytics"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      POSTGRES_USER: gaming
+      POSTGRES_PASSWORD: ci-only-placeholder
+      PGHOST: localhost
+      PGPORT: "5432"
+      PGUSER: gaming
+      PGPASSWORD: ci-only-placeholder
+      PGDATABASE: gaming_analytics
+      # Hide "already exists, skipping" NOTICEs so real errors stand out in the log.
+      PGOPTIONS: -c client_min_messages=warning
+      # dbt and the Excel loader
+      DBT_HOST: localhost
+      ANALYTICS_HOST: localhost
+      ANALYTICS_PORT: "5432"
+      ANALYTICS_DB: gaming_analytics
+      # One database plays both roles in CI: the generator writes the source
+      # tables into public, the fixture then copies them into bronze.
+      DATABASE_URL: postgresql://gaming:ci-only-placeholder@localhost:5432/gaming_analytics
+      DASHBOARD_DB_PASSWORD: ci-dashboard-placeholder
+      PSQL: psql -v ON_ERROR_STOP=1 -q
+
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create the source schema
+        run: |
+          $PSQL -f sql/source_schema.sql
+          $PSQL -f sql/002_meltano_incremental_migration.sql
+
+      - name: Generate synthetic source data (small, fixed seed)
+        run: >-
+          python -m ingestion.generate.generate_gaming_data
+          --mode initial --seed 42
+          --players 500 --games 60
+          --sessions 5000 --purchases 1500 --reviews 1000
+
+      - name: Emulate the Meltano sync into Bronze
+        run: $PSQL -f tests/fixtures/ci_bronze_from_source.sql
+
+      - name: Create the RAWG and Excel Bronze tables
+        run: |
+          $PSQL -f sql/003_rawg_schema.sql
+          $PSQL -f sql/004_excel_business_schema.sql
+
+      - name: Generate and load the business workbooks
+        run: |
+          python -m ingestion.excel.generate_business_data --seed 42 --campaign-count 20
+          python -m ingestion.excel.load_excel
+
+      - name: Create the least-privilege access roles
+        run: $PSQL -v dashboard_password="$DASHBOARD_DB_PASSWORD" -f sql/006_access_roles.sql
+
+      - name: dbt build (first run, full)
+        run: dbt build --project-dir dbt --profiles-dir dbt
+
+      - name: Append new source activity and re-sync Bronze
+        run: |
+          python -m ingestion.generate.generate_gaming_data \
+            --mode append --seed 123 \
+            --players 50 --games 5 --sessions 500 --purchases 150 --reviews 100 --achievements 100
+          $PSQL -c "UPDATE public.games SET price = price + 1, updated_at = now() WHERE game_id = 1"
+          $PSQL -f tests/fixtures/ci_bronze_from_source.sql
+
+      - name: dbt build (second run, incremental + snapshot path)
+        run: dbt build --project-dir dbt --profiles-dir dbt
+
+      - name: Check that the snapshot recorded the price change
+        run: |
+          versions=$($PSQL -tA -c "SELECT count(*) FROM gold.dim_games_history WHERE game_id = 1")
+          echo "dim_games_history versions for game 1: $versions"
+          test "$versions" -ge 2
+
+      - name: Check that dashboard_user reads Gold but not Silver
+        env:
+          PGUSER: dashboard_user
+          PGPASSWORD: ci-dashboard-placeholder
+        run: |
+          rows=$($PSQL -tA -c "SELECT count(*) FROM gold.mart_daily_kpis")
+          echo "dashboard_user can read gold.mart_daily_kpis: $rows rows"
+          test "$rows" -gt 0
+          if $PSQL -c "SELECT 1 FROM silver.stg_players LIMIT 1" 2>/dev/null; then
+            echo "::error::dashboard_user could read Silver (PII). Access roles are broken."
+            exit 1
+          fi
+          echo "dashboard_user is denied Silver, as expected."
+
+      - name: Upload dbt results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbt-results
+          path: |
+            dbt/target/run_results.json
+            dbt/target/manifest.json
+            dbt/logs/dbt.log
+          if-no-files-found: ignore

@@ -122,7 +122,7 @@ services:
       TAP_POSTGRES_PORT: "5432"
       TAP_POSTGRES_DATABASE: ${POSTGRES_DB:-gaming_source}
     ports:
-      - "127.0.0.1:${AIRFLOW_PORT:-8080}:8080"
+      - "${PUBLIC_BIND_ADDRESS:-127.0.0.1}:${AIRFLOW_PORT:-8080}:8080"
     volumes:
       - airflow_home:/opt/airflow
       - meltano_airflow_state:/opt/meltano/.meltano
@@ -172,7 +172,7 @@ services:
     cap_drop:
       - ALL
     ports:
-      - "127.0.0.1:${DASHBOARD_PORT:-8501}:8501"
+      - "${PUBLIC_BIND_ADDRESS:-127.0.0.1}:${DASHBOARD_PORT:-8501}:8501"
     healthcheck:
       test:
         - CMD
@@ -264,7 +264,7 @@ services:
     restart: unless-stopped
     environment: *openmetadata-server-environment
     ports:
-      - "127.0.0.1:${OPENMETADATA_PORT:-8585}:8585"
+      - "${PUBLIC_BIND_ADDRESS:-127.0.0.1}:${OPENMETADATA_PORT:-8585}:8585"
     healthcheck:
       test:
         - CMD

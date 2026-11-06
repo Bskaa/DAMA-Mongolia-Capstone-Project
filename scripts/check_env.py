@@ -103,6 +103,13 @@ def audit_env(env: Mapping[str, str | None]) -> list[Finding]:
     else:
         add("INFO", "SMTP is not configured: alerts are logged in monitoring.alert_log but not emailed")
 
+    # Web UIs only; the databases are always published on 127.0.0.1 (docker-compose.yml).
+    bind = value.get("PUBLIC_BIND_ADDRESS", "127.0.0.1")
+    if bind not in ("", "127.0.0.1", "localhost", "::1"):
+        add("WARN", f"PUBLIC_BIND_ADDRESS={bind}: Airflow, the dashboard and OpenMetadata are reachable "
+                    "from the network. Allow only trusted IPs in the DOCKER-USER firewall chain and "
+                    "change the OpenMetadata admin password (docs/deploy_vps.md, step 10b)")
+
     if value.get("OPENMETADATA_DB_PASSWORD", "openmetadata_password") == "openmetadata_password":
         add("INFO", "OpenMetadata uses the image's default MySQL user password (local learning only)")
     if not value.get("RAWG_API_KEY"):
