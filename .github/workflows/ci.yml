@@ -42,6 +42,7 @@ jobs:
       ANALYTICS_DB: gaming_analytics
       POSTGRES_USER: gaming
       POSTGRES_PASSWORD: ci-only-placeholder
+      AIRFLOW__API_AUTH__JWT_SECRET: ci-only-placeholder-jwt-secret-not-real
     steps:
       - name: Check out the code
         uses: actions/checkout@v4
